@@ -9,6 +9,7 @@ val scalaJSVersion = "1.0.1"
 scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-encoding", "utf-8")
 
 libraryDependencies ++= Seq(
+  "org.scala-lang" % "scala-library" % scalaVersion.value,
   "org.eclipse.jdt" % "org.eclipse.jdt.core" % "3.20.0",
   "org.scala-js" % "scalajs-ir_2.13" % scalaJSVersion,
   "org.scala-js" % "scalajs-compiler_2.13.0" % scalaJSVersion,
@@ -25,7 +26,7 @@ javaOptions ++= {
     }
   }
 
-
+  System.setProperty("jfe.scalalib", getDependency("scala-library*").getAbsolutePath)
   System.setProperty("jfe.sjslib", getDependency("scalajs-library*").getAbsolutePath)
   Seq()
 }

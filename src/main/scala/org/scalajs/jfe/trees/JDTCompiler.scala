@@ -516,7 +516,7 @@ object JDTCompiler {
             genExprValue(e.getExpression),
             jsn.ClassName(e.getExpression.resolveTypeBinding.getQualifiedName),
             js.FieldIdent(jsn.FieldName(e.getName.getIdentifier))
-        )
+        )(sjsType(e.resolveTypeBinding))
 
         case e: jdt.InfixExpression =>
           println(e.resolveTypeBinding())

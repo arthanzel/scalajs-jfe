@@ -1,6 +1,7 @@
 package org.scalajs.jfe
 
 import java.io.{File, StringWriter}
+import java.nio.file.Paths
 
 import org.eclipse.jdt.core.{dom => jdt}
 import org.scalajs.ir.Printers.IRTreePrinter
@@ -10,6 +11,7 @@ import org.scalajs.nscplugin.ScalaJSPlugin
 
 import scala.io.BufferedSource
 import scala.reflect.internal.util.BatchSourceFile
+import scala.reflect.io.Path
 import scala.tools.nsc
 import scala.tools.nsc.reporters.ConsoleReporter
 
@@ -28,7 +30,7 @@ object ASTUtils {
   def newCompilerSettings(): nsc.Settings = {
     val s = new nsc.Settings()
     s.processArguments(List(
-      "-bootclasspath", "/home/martin/.sdkman/candidates/scala/current/lib/scala-library.jar",
+      "-bootclasspath", System.getProperty("jfe.scalalib"),
       "-classpath", Seq(System.getProperty("jfe.sjslib")).mkString(File.pathSeparator)
     ), processAll = true)
     s
@@ -39,10 +41,17 @@ object ASTUtils {
   }
 
   def compileJavaString(code: String): jdt.CompilationUnit = {
+    val resources = Paths.get(".", "src/test/resources").toAbsolutePath.toString
+
     val parser = jdt.ASTParser.newParser(jdt.AST.JLS13)
     // TODO: Resolve bindings better
     parser.setResolveBindings(true)
-    parser.setEnvironment(Array("/home/martin/Code/scalajs-jfe/src/test/resources"), Array("/home/martin/Code/scalajs-jfe/src/test/resources"), null, true)
+    parser.setEnvironment(
+      Array(resources),
+      Array(resources),
+      null,
+      true
+    )
     parser.setUnitName("unit")
     parser.setSource(code.toCharArray)
     parser.createAST(null).asInstanceOf[jdt.CompilationUnit]
