@@ -28,10 +28,14 @@ object ASTUtils {
   }
 
   def newCompilerSettings(): nsc.Settings = {
+    val outDir = Paths.get(".", System.getProperty("jfe.outdir")).toAbsolutePath
+    outDir.toFile.mkdirs()
+
     val s = new nsc.Settings()
     s.processArguments(List(
+      "-d", outDir.toString,
       "-bootclasspath", System.getProperty("jfe.scalalib"),
-      "-classpath", Seq(System.getProperty("jfe.sjslib")).mkString(File.pathSeparator)
+      "-classpath", Seq(System.getProperty("jfe.sjslib")).mkString(File.pathSeparator),
     ), processAll = true)
     s
   }
