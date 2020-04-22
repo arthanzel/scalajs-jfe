@@ -1,0 +1,10 @@
+Immutable vs mutable variables:
+The ScalaJS compiler appear to do some data flow analysis and emit `val` variable declarations even when declared with the `var` keyword, as long as the variable is unmodified. This appears to be done in `GenJSCode.scala:patchMutableFlagOfLocals`. If there is a later assignment to the variable, the proper `var` declaration is emitted. This makes testing challenging because the Java semantics allow for mutability by default. Fields can also be accessed externally, so they must be mutable if a class in another compilation unit can access them.
+
+This mostly means that certain constructs can't be tested by comparing the Java AST to the functionally-equivalent Scala AST. But that's actually OK, because very few equivalent Scala programs actually generate semantically-equivalent SJS ASTs, and so can't really be compared.
+
+Constructors:
+Scala requires that classes be constructible, directly or indirectly, via one constructor. In Java, there is no such restriction. Java constructors can call other constructors, albeit only as the first statement in the constructor. This guarantees that there is *at least one* top-level constructor whose code will be called before all other constructors, so field initializers must be duplicated in these constructors.
+
+Binary ops:
+Scala does not have ++ or -- operators. Further, arithmetic operators are implemented as methods that return a single datatype, usually an int, so something like `var b: Byte = 1; b+= 1` is illegal because it tries to assign an Int to a Byte. Further, ++ and -- operators may return values, which causes different code to be emitted depending on whether the operator is an expression or statement.

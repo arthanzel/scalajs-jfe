@@ -1,0 +1,9 @@
+package org.scalajs.jfe;
+
+public class TestClass {
+    private int a = 3;
+
+    public int getA() {
+        return 3;
+    }
+}
