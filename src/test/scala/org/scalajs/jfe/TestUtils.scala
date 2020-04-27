@@ -1,14 +1,22 @@
 package org.scalajs.jfe
 
+import java.util.concurrent.TimeUnit
+
 import org.scalajs.ir.{Trees => js}
 import org.scalajs.jfe.trees.JDTCompiler
+import org.scalajs.jsenv.Input
+import org.scalajs.jsenv.nodejs.NodeJSEnv
+import org.scalajs.jsenv.test.kit.TestKit
+import org.scalajs.logging.{Level, ScalaConsoleLogger}
 import org.scalatest.Assertion
 import org.scalatest.Assertions.assert
+
+import scala.concurrent.duration.FiniteDuration
 
 object TestUtils {
   def assertJava(javaCode: String, expectedIR: String): Unit = {
     val jdt = ASTUtils.compileJavaString(javaCode)
-    val sjs = JDTCompiler.gen(jdt)
+    val sjs = JDTCompiler(jdt)
     assert(sjs.length == 1)
     assertIREquals(sjs.head.show, expectedIR)
   }
@@ -17,7 +25,7 @@ object TestUtils {
     assertJava(javaCode, ASTUtils.astToString(ASTUtils.compileString(scalaCode).head))
   }
 
-  def assertStatements(javaStatements: String, sjsirStatements: String): Unit = {
+  def assertStatements(javaStatements: String, sjsirStatements: String, msg: String = ""): Unit = {
     val ast = ASTUtils.javaToSJS(
       s"""
          |package test
@@ -44,8 +52,21 @@ object TestUtils {
         }
         .get
     )
-    assertIREquals(testStatements, sjsirStatements)
+    assertIREquals(testStatements, sjsirStatements, msg)
   }
+
+  def assertRun(javaCode: String, expectedOut: String): Unit = {
+    // Remember to add \n to expectedOut
+    val ast = ASTUtils.javaToSJS(javaCode).head
+    val linked = Runner.link(ast, new ScalaConsoleLogger(Level.Error))
+    val kit = new TestKit(new NodeJSEnv(), FiniteDuration(5L, TimeUnit.SECONDS))
+    kit.withRun(Seq(Input.Script(linked))) { run =>
+      run.expectOut(expectedOut + "\n").closeRun()
+    }
+  }
+
+  def assertRun(javaCode: String, expectedOut: Seq[String]): Unit =
+    assertRun(javaCode, expectedOut.mkString("\n"))
 
   def trimWhitespace(s: String): String = s
     .split("\n")
@@ -53,10 +74,10 @@ object TestUtils {
     .diff(Seq(""))
     .mkString("\n")
 
-  def assertIREquals(ir: js.IRNode, expected: String): Assertion =
-    assertIREquals(ir.show, expected)
+  def assertIREquals(ir: js.IRNode, expected: String, msg: String): Assertion =
+    assertIREquals(ir.show, expected, msg)
 
-  def assertIREquals(ir: String, expected: String): Assertion = {
-    assert(trimWhitespace(ir) == trimWhitespace(expected))
+  def assertIREquals(ir: String, expected: String, msg: String = ""): Assertion = {
+    assert(trimWhitespace(ir) == trimWhitespace(expected), msg)
   }
 }

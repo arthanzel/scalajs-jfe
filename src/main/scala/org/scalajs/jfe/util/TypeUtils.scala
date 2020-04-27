@@ -16,14 +16,18 @@ object TypeUtils {
     else if (Modifier.isPublic(m))
       js.MemberNamespace.Public
     else if (Modifier.isStatic(m))
-      js.MemberNamespace.PublicStatic //js.MemberNamespace.PrivateStatic
+      js.MemberNamespace.PrivateStatic
     else
-      js.MemberNamespace.Public //js.MemberNamespace.Private
+      js.MemberNamespace.Private
 
     // TODO: Protected scope?
   }
 
-//  def methodType(m: jdt.M)
+  def nsAccess(m: Int): js.MemberNamespace = {
+    import jdt.Modifier
+    if (Modifier.isPublic(m)) js.MemberNamespace.Public
+    else js.MemberNamespace.Public
+  }
 
   def sjsType(t: jdt.ITypeBinding): jst.Type = {
     if (t.isPrimitive) {

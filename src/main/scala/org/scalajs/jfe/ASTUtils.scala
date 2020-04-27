@@ -41,7 +41,7 @@ object ASTUtils {
   }
 
   def javaToSJS(javaCode: String): List[Trees.ClassDef] = {
-    JDTCompiler.gen(compileJavaString(javaCode))
+    JDTCompiler(compileJavaString(javaCode))
   }
 
   def compileJavaString(code: String): jdt.CompilationUnit = {

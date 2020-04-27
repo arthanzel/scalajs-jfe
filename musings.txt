@@ -1,6 +1,8 @@
 Immutable vs mutable variables:
 The ScalaJS compiler appear to do some data flow analysis and emit `val` variable declarations even when declared with the `var` keyword, as long as the variable is unmodified. This appears to be done in `GenJSCode.scala:patchMutableFlagOfLocals`. If there is a later assignment to the variable, the proper `var` declaration is emitted. This makes testing challenging because the Java semantics allow for mutability by default. Fields can also be accessed externally, so they must be mutable if a class in another compilation unit can access them.
 
+JDT does do similar analysis via the `isEffectivelyFinal` method of variable bindings.
+
 This mostly means that certain constructs can't be tested by comparing the Java AST to the functionally-equivalent Scala AST. But that's actually OK, because very few equivalent Scala programs actually generate semantically-equivalent SJS ASTs, and so can't really be compared.
 
 Constructors:

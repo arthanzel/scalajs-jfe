@@ -5,22 +5,50 @@ import org.eclipse.jdt.core.{dom => jdt}
 import org.scalajs.ir.Trees.OptimizerHints
 import org.scalajs.ir.{ClassKind, OriginalName, Position, Names => jsn, Trees => js, Types => jst}
 import org.scalajs.jfe.TextUtils
+import org.scalajs.jfe.util.AccessCounted
 
-import scala.collection.mutable
-import scala.jdk.CollectionConverters._
+import scala.reflect.ClassTag
+
+object Helpers {
+
+  // JDT has lots of untyped lists. Here's a helper to cast them to concrete
+  // Scala lists.
+  implicit class ListHasAsScala(l: java.util.List[_]) {
+    def asScala[A: ClassTag]: List[A] = l.toArray.map(_.asInstanceOf[A]).toList
+  }
+
+}
 
 object JDTCompiler {
+  def apply(compilationUnit: jdt.CompilationUnit): List[js.ClassDef] =
+    new JDTCompiler(compilationUnit).gen()
+}
+
+// Make the compiler a class so that it stores state information more easily
+private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
+
+  import Helpers._
+  import TextUtils.freshName
+
   private val NoOriginalName = OriginalName.NoOriginalName
   private val NoOptimizerHints = OptimizerHints.empty
+  private val NoPosition = Position.NoPosition
   private val WithConstructorFlags = js.ApplyFlags.empty.withConstructor(true)
 
-  def gen(compilationUnit: jdt.CompilationUnit): List[js.ClassDef] = {
+  def gen(): List[js.ClassDef] = {
     // region State variables
 
     var qualifiedThis: String = ""
-    lazy val qualifiedClassName: jsn.ClassName = jsn.ClassName(qualifiedThis)
-    lazy val qualifiedClassType: jst.ClassType = jst.ClassType(qualifiedClassName)
+    lazy val thisClassName: jsn.ClassName = jsn.ClassName(qualifiedThis)
+    lazy val thisClassType: jst.ClassType = jst.ClassType(thisClassName)
+    lazy val staticInitializerIdent = js.MethodIdent(
+      jsn.MethodName(TextUtils.freshName("$sjsirStaticInitializer"), Nil, jst.VoidRef)
+    )(NoPosition)
 
+    def thisNode(implicit pos: Position): js.This = js.This()(thisClassType)
+
+    // Return scopes are created on every method or function definition.
+    // Return statements always exit the nearest return scope.
     val returnScope = new ScopedStack[String]
 
     def withReturnScope(tpe: jst.Type)
@@ -33,8 +61,6 @@ object JDTCompiler {
           body
         )
       }
-
-    def thisClassType(implicit pos: Position): js.This = js.This()(qualifiedClassType)
 
     // endregion
 
@@ -50,7 +76,6 @@ object JDTCompiler {
         .map(_.resolveBinding.getQualifiedName)
         .orElse(Some("java.lang.Object"))
         .get
-      val moduleClassName = jsn.ClassName(s"${qualifiedThis}$$")
 
       // Partition members
       val jdtStaticFields = cls.getFields.filter { f => jdt.Modifier.isStatic(f.getModifiers) }
@@ -59,22 +84,27 @@ object JDTCompiler {
       val jdtInstanceMethods = cls.getMethods.diff(jdtStaticMethods)
 
       // Preprocess members to make internal counters consistent
-      val sjsStaticFields = jdtStaticFields.flatMap(genFields)
-      val sjsInstanceFields = jdtInstanceFields.flatMap(genFields)
-      val sjsStaticMethods = jdtStaticMethods.map(genMethod)
-      val sjsInstanceMethods = jdtInstanceMethods.map(genMethod)
+      val sjsFields = cls.getFields.flatMap(genFields)
+      val sjsMethods = cls.getMethods.map(genMethod)
 
       // Generate default constructor
       val ctors = if (!jdtInstanceMethods.exists(_.isConstructor)) Seq(
         genDefaultConstructor(jsn.ClassName(superClassName), jdtInstanceFields)
       ) else Nil
 
+      // Generate static accessors and initializers
+      val staticSynthetics: Seq[js.MemberDef] = if (!jdtStaticFields.isEmpty) (
+        sjsFields.flatMap(f => genStaticAccessors(f, staticInitializerIdent)) ++
+          genStaticInitializer(jdtStaticFields, staticInitializerIdent)
+        ) else Nil
+
       // Generate class def
-      val body: Seq[js.MemberDef] = sjsInstanceFields ++
-        sjsInstanceMethods ++
+      val body: Seq[js.MemberDef] = sjsFields ++
+        staticSynthetics ++
+        sjsMethods ++
         ctors.toList ++
-        genStaticMethodStubs(moduleClassName, sjsStaticMethods) ++
-        genStaticFieldStubs(moduleClassName, sjsStaticFields)
+        Nil
+
       val classDef = js.ClassDef(
         js.ClassIdent(jsn.ClassName(qualifiedThis)),
         NoOriginalName,
@@ -88,50 +118,56 @@ object JDTCompiler {
         List()
       )(NoOptimizerHints)
 
-      // Return the module class if there exist statics
-      if (jdtStaticFields.isEmpty && jdtStaticMethods.isEmpty) Seq(classDef)
-      else {
-        val body = sjsStaticFields ++
-          sjsStaticMethods ++
-          Seq(genStaticConstructor(moduleClassName, jsn.ClassName(superClassName), jdtStaticFields))
-        val moduleDef = js.ClassDef(
-          js.ClassIdent(moduleClassName), classDef.originalName, ClassKind.ModuleClass, None,
-          classDef.superClass, List(), None, None, body.toList, List()
-        )(NoOptimizerHints)
-        Seq(moduleDef, classDef)
-      }
+      Seq(classDef)
     }
 
+    /*
+    JDT provides field initializers alongside the variable declaration AST node,
+    but SJSIR disallows that and puts initializers in the constructor instead.
+    This is method is called when generating top-level constructors to add
+    initializers back in.
+
+    JDT also allows a single declaration node to declare multiple fields of the
+    same type, each with different initializers, so a Seq is returned.
+     */
     def genFieldInitializers(fieldDecls: Seq[jdt.FieldDeclaration], thisName: jsn.ClassName)
                             (implicit pos: Position): Seq[js.Assign] = {
       fieldDecls.flatMap { field =>
         field.fragments.toArray
           .map(_.asInstanceOf[jdt.VariableDeclarationFragment])
           .map { frag =>
+            val ident = js.FieldIdent(jsn.FieldName(frag.getName.getIdentifier))
             val tpe = sjsType(field.getType.resolveBinding)
+            val select = if (jdt.Modifier.isStatic(field.getModifiers)) {
+              js.SelectStatic(thisClassName, ident)(tpe)
+            } else {
+              js.Select(thisNode, thisClassName, ident)(tpe)
+            }
+
             js.Assign(
-              js.Select(
-                js.This()(jst.ClassType(thisName)),
-                thisName,
-                js.FieldIdent(jsn.FieldName(frag.getName.getIdentifier))
-              )(tpe),
+              select,
               genExprValue(frag.getInitializer, Some(tpe))
             )
           }
       }
     }
 
+    /*
+    If the type is implicit constructible, this method creates a synthetic
+    constructor taking no parameters that calls the super constructor and
+    initializes all fields.
+     */
     def genDefaultConstructor(superClassName: jsn.ClassName, fieldDecls: Seq[jdt.FieldDeclaration])
                              (implicit pos: Position): js.MethodDef = {
       val constructorIdent = js.MethodIdent(jsn.MethodName("<init>", List(), jst.VoidRef))
       val superConstructorCall = js.ApplyStatically(
         WithConstructorFlags,
-        thisClassType,
+        thisNode,
         superClassName,
         constructorIdent,
         List()
       )(jst.NoType)
-      val fieldInitializers = genFieldInitializers(fieldDecls, qualifiedClassName)
+      val fieldInitializers = genFieldInitializers(fieldDecls, thisClassName)
 
       js.MethodDef(
         js.MemberFlags.empty.withNamespace(js.MemberNamespace.Constructor),
@@ -143,119 +179,14 @@ object JDTCompiler {
       )(NoOptimizerHints, None)
     }
 
-    def genStaticConstructor(moduleClassName: jsn.ClassName,
-                             superClassName: jsn.ClassName,
-                             fieldDecls: Seq[jdt.FieldDeclaration])
-                            (implicit pos: Position): js.MethodDef = {
-      val constructorIdent = js.MethodIdent(jsn.MethodName("<init>", List(), jst.VoidRef))
-      val superConstructorCall = js.ApplyStatically(
-        WithConstructorFlags,
-        thisClassType,
-        superClassName,
-        constructorIdent,
-        List()
-      )(jst.NoType)
-      val storeModule = js.StoreModule(
-        moduleClassName,
-        js.This()(jst.ClassType(moduleClassName))
-      )
-      val fieldInitializers = genFieldInitializers(fieldDecls, moduleClassName)
-
-      js.MethodDef(
-        js.MemberFlags.empty.withNamespace(js.MemberNamespace.Constructor),
-        constructorIdent,
-        NoOriginalName,
-        List(),
-        jst.NoType,
-        Some(js.Block(superConstructorCall :: storeModule :: fieldInitializers.toList))
-      )(NoOptimizerHints, None)
-    }
-
-    def genStaticFieldStubs(moduleClassName: jsn.ClassName, defs: Array[js.FieldDef])
-                           (implicit pos: Position): Seq[js.MethodDef] = {
-      defs.flatMap { f =>
-        // TODO: Field public/private
-
-        val getter = js.MethodDef(
-          js.MemberFlags.empty.withNamespace(js.MemberNamespace.PublicStatic),
-          js.MethodIdent(jsn.MethodName(
-            f.name.name.nameString,
-            Nil,
-            sjsTypeRef(f.ftpe)
-          )),
-          NoOriginalName,
-          Nil,
-          f.ftpe,
-          Some(
-            js.Select(
-              js.LoadModule(moduleClassName),
-              moduleClassName,
-              f.name
-            )(f.ftpe)
-          )
-        )(NoOptimizerHints, None)
-
-        // TODO: Static field mutable?
-        val param = js.LocalIdent(jsn.LocalName("x"))
-        val setter = js.MethodDef(
-          js.MemberFlags.empty.withNamespace(js.MemberNamespace.PublicStatic),
-          js.MethodIdent(jsn.MethodName(
-            s"${f.name.name.nameString}_$$eq",
-            List(sjsTypeRef(f.ftpe)),
-            jst.NothingRef
-          )),
-          NoOriginalName,
-          List(js.ParamDef(
-            param,
-            NoOriginalName,
-            f.ftpe,
-            mutable = false,
-            rest = false
-          )),
-          f.ftpe,
-          Some(
-            js.Assign(
-              js.Select(
-                js.LoadModule(moduleClassName),
-                moduleClassName,
-                f.name
-              )(f.ftpe),
-              js.VarRef(param)(f.ftpe)
-            )
-          )
-        )(NoOptimizerHints, None)
-
-        Seq(getter, setter)
-      }
-    }
-
-    def genStaticMethodStubs(moduleClassName: jsn.ClassName, defs: Seq[js.MethodDef])
-                            (implicit pos: Position): Seq[js.MethodDef] = {
-      defs.map { m =>
-        js.MethodDef(
-          js.MemberFlags.empty.withNamespace(js.MemberNamespace.PublicStatic),
-          js.MethodIdent(m.methodName),
-          NoOriginalName,
-          m.args,
-          m.resultType,
-          Some(
-            js.Apply(
-              js.ApplyFlags.empty,
-              js.LoadModule(moduleClassName),
-              js.MethodIdent(m.methodName),
-              m.args.map { arg =>
-                js.VarRef(arg.name)(arg.ptpe)
-              }
-            )(m.resultType)
-          )
-        )(NoOptimizerHints, None)
-      }
-    }
-
+    /**
+     * Generates SJS field defs for a JDT field declaration.
+     * In JDT, a single field declaration can define several fields.
+     */
     def genFields(field: jdt.FieldDeclaration): Seq[js.FieldDef] = {
       implicit val position: Position = pos(field)
 
-      def processFragment(frag: jdt.VariableDeclarationFragment): js.FieldDef = {
+      def genFragment(frag: jdt.VariableDeclarationFragment): js.FieldDef = {
         js.FieldDef(
           js.MemberFlags.empty
             .withNamespace(memberNamespace(field.getModifiers))
@@ -266,9 +197,97 @@ object JDTCompiler {
         )
       }
 
-      field.fragments.toArray
-        .map(_.asInstanceOf[jdt.VariableDeclarationFragment])
-        .map(processFragment)
+      field.fragments.asScala[jdt.VariableDeclarationFragment]
+        .map(genFragment)
+    }
+
+    def genStaticAccessors(fieldDef: js.FieldDef, staticInitializerIdent: js.MethodIdent): Seq[js.MemberDef] = {
+      implicit val pos: Position = fieldDef.pos
+
+      if (!fieldDef.flags.namespace.isStatic) Seq(fieldDef)
+      else {
+        val flags = js.MemberFlags.empty.withNamespace(fieldDef.flags.namespace)
+        val typeRef = sjsTypeRef(fieldDef.ftpe)
+        val valueIdent = js.LocalIdent(jsn.LocalName("value"))
+        val select = js.SelectStatic(thisClassName, fieldDef.name)(fieldDef.ftpe)
+
+        def withInitializerCall(tree: js.Tree): js.Tree = js.Block(
+          js.ApplyStatic(js.ApplyFlags.empty, thisClassName, staticInitializerIdent, Nil)(jst.NoType),
+          tree
+        )
+
+        Seq(
+          // Getter
+          js.MethodDef(
+            flags,
+            js.MethodIdent(jsn.MethodName(
+              nameString(fieldDef),
+              Nil,
+              typeRef)
+            ),
+            NoOriginalName,
+            Nil,
+            fieldDef.ftpe,
+            Some(withInitializerCall(select))
+          )(NoOptimizerHints, None),
+
+          // Setter
+          js.MethodDef(
+            flags,
+            js.MethodIdent(jsn.MethodName(
+              s"${nameString(fieldDef)}_$$eq",
+              List(typeRef),
+              jst.VoidRef
+            )),
+            NoOriginalName,
+            List(js.ParamDef(
+              valueIdent, NoOriginalName, fieldDef.ftpe, mutable = false, rest = false)
+            ),
+            jst.NoType,
+            Some(withInitializerCall(
+              js.Assign(select, js.VarRef(valueIdent)(fieldDef.ftpe))
+            ))
+          )(NoOptimizerHints, None)
+        )
+      }
+    }
+
+    def genStaticInitializer(statics: Seq[jdt.FieldDeclaration],
+                             staticInitializerIdent: js.MethodIdent): Seq[js.MemberDef] = {
+      implicit val pos: Position = NoPosition
+
+      // TODO: Support custom static initializers
+
+      val flagIdent = js.FieldIdent(jsn.FieldName(freshName("$sjsirStaticCalled")))
+      val flagSelect = js.SelectStatic(thisClassName, flagIdent)(jst.BooleanType)
+      val memberFlags = js.MemberFlags.empty.withNamespace(js.MemberNamespace.PublicStatic)
+
+      val flag = js.FieldDef(memberFlags.withMutable(true),
+        flagIdent, NoOriginalName, jst.BooleanType)
+
+      val initializer = js.MethodDef(
+        memberFlags,
+        staticInitializerIdent,
+        NoOriginalName,
+        Nil,
+        jst.NoType,
+        Some(
+          js.If(
+            js.BinaryOp(
+              js.BinaryOp.Boolean_!=,
+              flagSelect,
+              js.BooleanLiteral(value = true)
+            ),
+            js.Block(
+//              js.Assign(flagSelect, js.BooleanLiteral(value = true)),
+              js.Block(genFieldInitializers(statics, thisClassName).toList)
+            ),
+            js.Skip()
+          )(jst.NoType)
+        )
+      )(NoOptimizerHints, None)
+
+      Seq(flag, initializer)
     }
 
     def genMethod(method: jdt.MethodDeclaration): js.MethodDef = {
@@ -281,10 +300,8 @@ object JDTCompiler {
       val resultType = toSJSType(method.getReturnType2)
       val resultTypeRef = toSJSTypeRef(method.getReturnType2)
 
-      val ns = memberNamespace(method.getModifiers)
-
       js.MethodDef(
-        js.MemberFlags.empty,
+        js.MemberFlags.empty.withNamespace(memberNamespace(method.getModifiers)),
         js.MethodIdent(jsn.MethodName(
           method.getName.getIdentifier,
           parameterTypeRefs,
@@ -301,11 +318,17 @@ object JDTCompiler {
           )
         },
         resultType,
-        Some(
-          withReturnScope(resultType) {
+        Some({
+          val body = withReturnScope(resultType) {
             genBlock(method.getBody)
           }
-        )
+          // Unwrap a single-statement return to an expression
+          body match {
+            case js.Labeled(_, _, ret: js.Return) =>
+              ret.expr
+            case other => other
+          }
+        })
       )(NoOptimizerHints, None)
     }
 
@@ -354,9 +377,8 @@ object JDTCompiler {
           js.Block(
             // Initializers
             // TODO: JDT uses a lot of untyped lists. Maybe provide an implicit method to convert and type them?
-            s.initializers.asScala.map(_.asInstanceOf[jdt.Expression])
-              .map(genExprValue(_))
-              .toList :+
+            s.initializers.asScala[jdt.Expression]
+              .map(genExprValue(_)) :+
 
               // Main loop
               js.While(
@@ -516,7 +538,7 @@ object JDTCompiler {
             genExprValue(e.getExpression),
             jsn.ClassName(e.getExpression.resolveTypeBinding.getQualifiedName),
             js.FieldIdent(jsn.FieldName(e.getName.getIdentifier))
-        )(sjsType(e.resolveTypeBinding))
+          )(sjsType(e.resolveTypeBinding))
 
         case e: jdt.InfixExpression =>
           println(e.resolveTypeBinding())
@@ -528,34 +550,93 @@ object JDTCompiler {
         case e: jdt.LambdaExpression => ???
 
         case e: jdt.MethodInvocation =>
-          val binding = e.resolveMethodBinding
-          val static = isStatic(binding)
-          // TODO: If the method is static, convert the receiver to the module class name
-          val receiver = Option(e.getExpression)
-            .map(genExprValue(_))
-            .getOrElse(js.This()(sjsType(binding.getDeclaringClass)))
+          val mb = e.resolveMethodBinding
+          val receiver = Option(e.getExpression) match {
+            //            case None if isInStaticScope(e) =>
+            //              // Call to a static method on this from the module class
+            //              js.This()(jst.ClassType(genClassName(qualifiedThis, static = true)))
+            //            case None if isStatic(mb) =>
+            //              // Call to a static method on this from the instance class
+            //              val m = js.LoadModule(genClassName(qualifiedThis, static = true))
+            //              m
+            case None =>
+              // Call to an instance method on this
+              js.This()(jst.ClassType(jsn.ClassName(mb.getDeclaringClass.getQualifiedName)))
+            case Some(expr) =>
+              // Receiver is specified
+              genExprValue(expr)
+          }
 
-          js.Apply(
-            js.ApplyFlags.empty,
-            receiver,
-            js.MethodIdent(jsn.MethodName(
-              e.getName.getIdentifier,
-              binding.getParameterTypes.map(sjsTypeRef).toList,
-              sjsTypeRef(binding.getReturnType)
-            )),
-            e.arguments().toArray
-              .map(_.asInstanceOf[jdt.Expression])
-              .map(genExprValue(_))
-              .toList
-          )(sjsType(e.resolveTypeBinding))
+          val ident = js.MethodIdent(jsn.MethodName(
+            e.getName.getIdentifier,
+            mb.getParameterTypes.map(sjsTypeRef).toList,
+            sjsTypeRef(mb.getReturnType)
+          ))
+          val args = e.arguments().asScala[jdt.Expression]
+            .map(genExprValue(_))
+          val tpe = sjsType(e.resolveTypeBinding)
+
+          if (isStatic(mb)) {
+            js.ApplyStatic(js.ApplyFlags.empty,
+              jsn.ClassName(mb.getDeclaringClass.getQualifiedName),
+              ident, args)(tpe)
+          }
+          else {
+            js.Apply(js.ApplyFlags.empty, receiver, ident, args)(tpe)
+          }
 
         case e: jdt.MethodReference => ???
 
-        case e: jdt.Name =>
+        case e: jdt.QualifiedName =>
+          val vb = e.resolveBinding().asInstanceOf[jdt.IVariableBinding]
+          if (isStatic(vb)) {
+            // Static members are accessed via a synthetic getter
+            js.ApplyStatic(
+              js.ApplyFlags.empty,
+              jsn.ClassName(vb.getDeclaringClass.getQualifiedName),
+              js.MethodIdent(jsn.MethodName(
+                vb.getName,
+                Nil,
+                sjsTypeRef(vb.getType)
+              )),
+              Nil
+            )(sjsType(vb.getType))
+          }
+          else {
+            // Instance members are plain selects
+            js.Select(
+              genExprValue(e.getQualifier),
+              jsn.ClassName(vb.getDeclaringClass.getQualifiedName),
+              js.FieldIdent(jsn.FieldName(e.getName.getIdentifier))
+            )(sjsType(vb.getType))
+          }
+
+        case e: jdt.SimpleName =>
           implicit val position: Position = pos(e)
-          js.VarRef(
-            js.LocalIdent(jsn.LocalName(e.getFullyQualifiedName))
-          )(sjsType(e.resolveTypeBinding()))
+
+          //          println("=== NAME", e.getFullyQualifiedName, e.isQualifiedName, e.resolveBinding.getClass)
+          val name = e.getFullyQualifiedName
+          val tpe = sjsType(e.resolveTypeBinding())
+          e.resolveBinding() match {
+            case v: jdt.IVariableBinding =>
+              if (v.isField && isStatic(v)) {
+                // TODO: Is name ever on lhs of assignment?
+                returnStatic(v.getName, sjsType(v.getType))
+              }
+              else if (v.isField) {
+                js.Select(
+                  js.This()(tpe),
+                  jsn.ClassName(v.getDeclaringClass.getQualifiedName),
+                  js.FieldIdent(jsn.FieldName(name))
+                )(tpe)
+              }
+              else js.VarRef(
+                js.LocalIdent(jsn.LocalName(name))
+              )(tpe)
+            case p: jdt.IMethodBinding => ???
+            case t: jdt.ITypeBinding =>
+              ???
+          }
 
         case e: jdt.NullLiteral => js.Null()
 
@@ -617,13 +698,23 @@ object JDTCompiler {
         case e: jdt.SuperMethodInvocation => ???
         case e: jdt.SwitchExpression => ???
 
-        case e: jdt.ThisExpression => thisClassType
+        case e: jdt.ThisExpression => thisNode
 
         case e: jdt.TypeLiteral => ???
         case e: jdt.TypeMethodReference => ???
         case e: jdt.VariableDeclarationExpression => ???
       }
     }
+
+    def returnStatic(name: String, tpe: jst.Type)
+                    (implicit pos: Position): js.Tree = js.ApplyStatic(
+      js.ApplyFlags.empty,
+      thisClassName,
+      js.MethodIdent(jsn.MethodName(
+        name, Nil, sjsTypeRef(tpe)
+      )),
+      Nil
+    )(tpe)
 
     // endregion
 
@@ -672,6 +763,8 @@ object JDTCompiler {
       )
       case t: jdt.SimpleType => jst.ClassRef(jsn.ClassName(t.resolveBinding().getQualifiedName))
     }
+
+    def nameString(f: js.FieldDef): String = f.name.name.nameString
 
     // TODO: Handle imports
     compilationUnit.types
