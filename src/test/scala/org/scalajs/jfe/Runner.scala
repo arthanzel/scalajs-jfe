@@ -32,7 +32,7 @@ object Runner {
   def link(classDef: ClassDef, logger: Logger, mainClass: String = "Main"): Path = {
     val mainIRFile = new ClassDefIRFileImpl("main.sjsir", None, classDef)
     val allIRFiles = libraryIRFiles :+ mainIRFile
-    val config = StandardConfig().withCheckIR(true)
+    val config = StandardConfig().withCheckIR(true).withOptimizer(false)
     val linker = StandardImpl.linker(config)
 
 //    val output = Jimfs.newFileSystem().getPath("output.js")

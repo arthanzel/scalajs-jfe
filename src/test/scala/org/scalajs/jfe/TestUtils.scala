@@ -1,19 +1,22 @@
 package org.scalajs.jfe
 
+import java.io.InputStream
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 
 import org.scalajs.ir.{Trees => js}
 import org.scalajs.jfe.trees.JDTCompiler
-import org.scalajs.jsenv.Input
-import org.scalajs.jsenv.nodejs.NodeJSEnv
-import org.scalajs.jsenv.test.kit.TestKit
+import org.scalajs.jsenv.{Input, RunConfig, nodejs}
 import org.scalajs.logging.{Level, ScalaConsoleLogger}
 import org.scalatest.Assertion
 import org.scalatest.Assertions.assert
 
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.Await
+import scala.concurrent.duration.Duration
 
 object TestUtils {
+  private val MAX_RUNTIME = Duration(5, TimeUnit.SECONDS)
+
   def assertJava(javaCode: String, expectedIR: String): Unit = {
     val jdt = ASTUtils.compileJavaString(javaCode)
     val sjs = JDTCompiler(jdt)
@@ -59,18 +62,28 @@ object TestUtils {
     // Remember to add \n to expectedOut
     val ast = ASTUtils.javaToSJS(javaCode).head
     val linked = Runner.link(ast, new ScalaConsoleLogger(Level.Error))
-    val kit = new TestKit(new NodeJSEnv(), FiniteDuration(5L, TimeUnit.SECONDS))
-    kit.withRun(Seq(Input.Script(linked))) { run =>
-      run.expectOut(expectedOut + "\n").closeRun()
+
+    val jsEnv = new nodejs.NodeJSEnv()
+    val input = Seq(Input.Script(linked))
+    var out: Option[InputStream] = None
+    val runConfig = RunConfig()
+      .withInheritOut(false)
+      .withOnOutputStream { (o, _) => out = o }
+    Await.result(jsEnv.start(input, runConfig).future, MAX_RUNTIME)
+
+    val actualOut = out match {
+      case Some(o) => new String(o.readAllBytes(), StandardCharsets.UTF_8)
+      case None => "Could not capture JS output stream!"
     }
+    assert(actualOut == expectedOut + "\n")
   }
 
-  def assertRun(javaCode: String, expectedOut: Seq[String]): Unit =
-    assertRun(javaCode, expectedOut.mkString("\n"))
+  def assertRun(javaCode: String, expectedOut: Seq[Any]): Unit =
+    assertRun(javaCode, expectedOut.map(_.toString).mkString("\n"))
 
   def trimWhitespace(s: String): String = s
     .split("\n")
-//    .map(_.trim)
+    //    .map(_.trim)
     .diff(Seq(""))
     .mkString("\n")
 
@@ -80,4 +93,14 @@ object TestUtils {
   def assertIREquals(ir: String, expected: String, msg: String = ""): Assertion = {
     assert(trimWhitespace(ir) == trimWhitespace(expected), msg)
   }
+}
+
+class StringLogger extends org.scalajs.logging.Logger {
+  val buffer: StringBuilder = new StringBuilder()
+
+  def mkString: String = buffer.mkString
+
+  override def log(level: Level, message: => String): Unit = buffer ++= message
+
+  override def trace(t: => Throwable): Unit = t.printStackTrace()
 }

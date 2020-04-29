@@ -146,7 +146,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
             js.Assign(
               select,
-              genExprValue(frag.getInitializer, Some(tpe))
+              cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
             )
           }
       }
@@ -279,7 +279,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
               js.BooleanLiteral(value = true)
             ),
             js.Block(
-//              js.Assign(flagSelect, js.BooleanLiteral(value = true)),
+              js.Assign(flagSelect, js.BooleanLiteral(value = true)),
               js.Block(genFieldInitializers(statics, thisClassName).toList)
             ),
             js.Skip()
@@ -410,9 +410,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
         case s: jdt.ReturnStatement =>
           /*
-           Unlike Scala, `return` returns from the nearest function or method.
-           Every method, function, or lambda definition must therefore create a
-           new return scope around its body.
+           Return from the nearest function or method.
+           In SJSIR, returns break out of the corresponding labeled block, and
+           so every function, method, or lambda enclose their body in a labeled
+           statement as a return scope.
            */
           js.Return(
             Option(s.getExpression)
@@ -443,7 +444,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
                   NoOriginalName,
                   tpe,
                   mutable = !jdt.Modifier.isFinal(s.getModifiers),
-                  genExprValue(frag.getInitializer, Some(tpe))
+                  cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
                 )
               }
               .toList
@@ -472,6 +473,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
       def recurse(expr: jdt.Expression) =
         genExpr(expr, false, tpe)
+
+      // TODO: Constant expressions may be optimized out into literals
+      // See https://docs.oracle.com/javase/specs/jls/se12/html/jls-15.html#jls-15.28
 
       expression match {
         case e: jdt.Annotation => ???
@@ -507,10 +511,20 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         )
 
         case e: jdt.Assignment =>
-          js.Assign(
-            genExprValue(e.getLeftHandSide),
-            genExprValue(e.getRightHandSide)
-          )
+          val lhs = genExprValue(e.getLeftHandSide)
+          lhs match {
+            case sel: js.ApplyStatic =>
+              // If the LHS is a (qualified) name of a static field, genExpr
+              // will return a static call to its getter instead.
+              // Static field assignments are also performed through a setter.
+              genStaticSet(
+                sel.method.name.simpleName.nameString,
+                sel.className,
+                genExprValue(e.getRightHandSide),
+                sjsTypeRef(sel.tpe)
+              )
+            case _ => js.Assign(lhs, genExprValue(e.getRightHandSide))
+          }
 
         case e: jdt.BooleanLiteral => js.BooleanLiteral(e.booleanValue())
 
@@ -551,21 +565,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
         case e: jdt.MethodInvocation =>
           val mb = e.resolveMethodBinding
-          val receiver = Option(e.getExpression) match {
-            //            case None if isInStaticScope(e) =>
-            //              // Call to a static method on this from the module class
-            //              js.This()(jst.ClassType(genClassName(qualifiedThis, static = true)))
-            //            case None if isStatic(mb) =>
-            //              // Call to a static method on this from the instance class
-            //              val m = js.LoadModule(genClassName(qualifiedThis, static = true))
-            //              m
-            case None =>
-              // Call to an instance method on this
-              js.This()(jst.ClassType(jsn.ClassName(mb.getDeclaringClass.getQualifiedName)))
-            case Some(expr) =>
-              // Receiver is specified
-              genExprValue(expr)
-          }
 
           val ident = js.MethodIdent(jsn.MethodName(
             e.getName.getIdentifier,
@@ -577,78 +576,36 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           val tpe = sjsType(e.resolveTypeBinding)
 
           if (isStatic(mb)) {
+            // Static call
             js.ApplyStatic(js.ApplyFlags.empty,
               jsn.ClassName(mb.getDeclaringClass.getQualifiedName),
               ident, args)(tpe)
           }
           else {
+            // Instance call
+            val receiver = Option(e.getExpression) match {
+              case None =>
+                // Call to an instance method; implied `this`
+                js.This()(jst.ClassType(jsn.ClassName(mb.getDeclaringClass.getQualifiedName)))
+              case Some(expr) =>
+                // Receiver is specified
+                genExprValue(expr)
+            }
             js.Apply(js.ApplyFlags.empty, receiver, ident, args)(tpe)
           }
 
         case e: jdt.MethodReference => ???
 
-        case e: jdt.QualifiedName =>
-          val vb = e.resolveBinding().asInstanceOf[jdt.IVariableBinding]
-          if (isStatic(vb)) {
-            // Static members are accessed via a synthetic getter
-            js.ApplyStatic(
-              js.ApplyFlags.empty,
-              jsn.ClassName(vb.getDeclaringClass.getQualifiedName),
-              js.MethodIdent(jsn.MethodName(
-                vb.getName,
-                Nil,
-                sjsTypeRef(vb.getType)
-              )),
-              Nil
-            )(sjsType(vb.getType))
-          }
-          else {
-            // Instance members are plain selects
-            js.Select(
-              genExprValue(e.getQualifier),
-              jsn.ClassName(vb.getDeclaringClass.getQualifiedName),
-              js.FieldIdent(jsn.FieldName(e.getName.getIdentifier))
-            )(sjsType(vb.getType))
-          }
-
-        case e: jdt.SimpleName =>
-          implicit val position: Position = pos(e)
-
-          //          println("=== NAME", e.getFullyQualifiedName, e.isQualifiedName, e.resolveBinding.getClass)
-          val name = e.getFullyQualifiedName
-          val tpe = sjsType(e.resolveTypeBinding())
-          e.resolveBinding() match {
-            case v: jdt.IVariableBinding =>
-              if (v.isField && isStatic(v)) {
-                // TODO: Is name ever on lhs of assignment?
-                returnStatic(v.getName, sjsType(v.getType))
-              }
-              else if (v.isField) {
-                js.Select(
-                  js.This()(tpe),
-                  jsn.ClassName(v.getDeclaringClass.getQualifiedName),
-                  js.FieldIdent(jsn.FieldName(name))
-                )(tpe)
-              }
-              else js.VarRef(
-                js.LocalIdent(jsn.LocalName(name))
-              )(tpe)
-            case p: jdt.IMethodBinding => ???
-            case t: jdt.ITypeBinding =>
-              ???
-          }
-
         case e: jdt.NullLiteral => js.Null()
 
         case e: jdt.NumberLiteral =>
-          val expectedType = tpe.getOrElse(sjsType(e.resolveTypeBinding))
+          val expectedType = sjsType(e.resolveTypeBinding)
+          val value = e.resolveConstantExpressionValue()
           expectedType match {
-            case jst.ByteType => js.ByteLiteral(e.getToken.toByte)
             case jst.DoubleType => js.DoubleLiteral(e.getToken.toDouble)
             case jst.FloatType => js.FloatLiteral(e.getToken.toFloat)
             case jst.IntType => js.IntLiteral(e.getToken.toInt)
-            case jst.LongType => js.LongLiteral(e.getToken.toLong)
-            case jst.ShortType => js.ShortLiteral(e.getToken.toShort)
+            case jst.LongType => js.LongLiteral(value.asInstanceOf[Long])
             case other =>
               throw new IllegalArgumentException(s"Cannot bind number literal ${e.getToken} to type ${other}")
           }
@@ -692,6 +649,53 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
         case e: jdt.PrefixExpression => ???
 
+
+
+        case e: jdt.QualifiedName =>
+          val vb = e.resolveBinding().asInstanceOf[jdt.IVariableBinding]
+          if (isStatic(vb)) {
+            // Static members are accessed via a synthetic getter
+            genStaticGet(
+              vb.getName,
+              jsn.ClassName(vb.getDeclaringClass.getQualifiedName),
+              sjsType(vb.getType)
+            )
+          }
+          else {
+            // Instance members are plain selects
+            js.Select(
+              genExprValue(e.getQualifier),
+              jsn.ClassName(vb.getDeclaringClass.getQualifiedName),
+              js.FieldIdent(jsn.FieldName(e.getName.getIdentifier))
+            )(sjsType(vb.getType))
+          }
+
+        case e: jdt.SimpleName =>
+          implicit val position: Position = pos(e)
+
+          val name = e.getFullyQualifiedName
+          val tpe = sjsType(e.resolveTypeBinding())
+          e.resolveBinding() match {
+            case v: jdt.IVariableBinding =>
+              if (v.isField && isStatic(v)) {
+                // TODO: Is name ever on lhs of assignment?
+                genStaticGet(v.getName, thisClassName, sjsType(v.getType))
+              }
+              else if (v.isField) {
+                js.Select(
+                  js.This()(tpe),
+                  jsn.ClassName(v.getDeclaringClass.getQualifiedName),
+                  js.FieldIdent(jsn.FieldName(name))
+                )(tpe)
+              }
+              else js.VarRef(
+                js.LocalIdent(jsn.LocalName(name))
+              )(tpe)
+            case p: jdt.IMethodBinding => ???
+            case t: jdt.ITypeBinding =>
+              ???
+          }
+
         case e: jdt.StringLiteral => js.StringLiteral(e.getLiteralValue)
 
         case e: jdt.SuperFieldAccess => ???
@@ -706,15 +710,33 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
       }
     }
 
-    def returnStatic(name: String, tpe: jst.Type)
+    /**
+     * Generates a static method call to get the value of a static field.
+     */
+    def genStaticGet(fieldName: String, receiverClassName: jsn.ClassName,
+                     tpe: jst.Type)
                     (implicit pos: Position): js.Tree = js.ApplyStatic(
       js.ApplyFlags.empty,
-      thisClassName,
+      receiverClassName,
       js.MethodIdent(jsn.MethodName(
-        name, Nil, sjsTypeRef(tpe)
+        fieldName, Nil, sjsTypeRef(tpe)
       )),
       Nil
     )(tpe)
+
+    /**
+     * Generates a static method call to set the value of a static field.
+     */
+    def genStaticSet(fieldName: String, receiverClassName: jsn.ClassName,
+                     value: js.Tree, typeRef: jst.TypeRef)
+                    (implicit pos: Position): js.Tree = js.ApplyStatic(
+      js.ApplyFlags.empty,
+      receiverClassName,
+      js.MethodIdent(jsn.MethodName(
+        s"${fieldName}_$$eq", List(typeRef), jst.VoidRef
+      )),
+      List(value)
+    )(jst.NoType)
 
     // endregion
 

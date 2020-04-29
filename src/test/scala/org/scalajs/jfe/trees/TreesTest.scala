@@ -39,15 +39,17 @@ class TreesTest extends AnyFunSpec with BeforeAndAfter {
 
   describe("For simple statements in methods,") {
     it("compiles primitive declarations") {
+      val aLong: Long = Int.MaxValue.toLong * 100
       assertStatements("boolean b = true;", "var b: boolean = true")
-      assertStatements("byte b = 99;", "var b: byte = 99_b")
+      assertStatements("byte b = 99;", "var b: byte = ((byte)99)")
       assertStatements("char c = 'x';", "var c: char = 'x'")
       assertStatements("double d = 88.8;", "var d: double = 88.8d")
-      assertStatements("float f = 9.9;", "var f: float = 9.9f")
+      assertStatements("float f = 9.9;", "var f: float = ((float)9.9d)")
       assertStatements("float f = 9.9f;", "var f: float = 9.9f")
       assertStatements("int i = 10;", "var i: int = 10")
-      assertStatements("long l = 11;", "var l: long = 11L")
-      assertStatements("short s = 12;", "var s: short = 12_s")
+      assertStatements("long l = 11;", "var l: long = ((long)11)")
+      assertStatements(s"long l = ${aLong}L;", "var l: long = 214748364700L")
+      assertStatements("short s = 12;", "var s: short = ((short)12)")
     }
 
     it("declares Objects as the <any> type") {
