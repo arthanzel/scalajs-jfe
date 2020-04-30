@@ -36,6 +36,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
   }
 
   describe("Language features:") {
+    describe("Flow control:") {
     it("handles if-else statements") {
       val src =
         """class Main {
@@ -60,6 +61,11 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |}""".stripMargin
       assertRun(src, "two")
     }
+
+      it("handles simple for loops") {
+
+      }
+  }
 
     it("handles literals") {
       val src =

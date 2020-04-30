@@ -4,30 +4,27 @@ import org.scalajs.jfe.util.TypeUtils._
 import org.eclipse.jdt.core.{dom => jdt}
 import org.scalajs.ir.Trees.OptimizerHints
 import org.scalajs.ir.{ClassKind, OriginalName, Position, Names => jsn, Trees => js, Types => jst}
-import org.scalajs.jfe.TextUtils
-import org.scalajs.jfe.util.AccessCounted
-
-import scala.reflect.ClassTag
-
-object Helpers {
-
-  // JDT has lots of untyped lists. Here's a helper to cast them to concrete
-  // Scala lists.
-  implicit class ListHasAsScala(l: java.util.List[_]) {
-    def asScala[A: ClassTag]: List[A] = l.toArray.map(_.asInstanceOf[A]).toList
-  }
-
-}
+import org.scalajs.jfe.{JavaCompilationException, TextUtils}
 
 object JDTCompiler {
   def apply(compilationUnit: jdt.CompilationUnit): List[js.ClassDef] =
     new JDTCompiler(compilationUnit).gen()
+
+  val terminatingStatements: Set[Class[_ <: jdt.Statement]] = Set(
+    classOf[jdt.ReturnStatement],
+    classOf[jdt.BreakStatement],
+    classOf[jdt.ContinueStatement],
+  )
+
+  def containsTerminatingStatement(stats: List[jdt.Statement]): Boolean =
+    stats.exists(stat => terminatingStatements.contains(stat.getClass))
 }
 
 // Make the compiler a class so that it stores state information more easily
 private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
-  import Helpers._
+  import JDTCompiler._
+  import TreeHelpers._
   import TextUtils.freshName
 
   private val NoOriginalName = OriginalName.NoOriginalName
@@ -50,16 +47,22 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
     // Return scopes are created on every method or function definition.
     // Return statements always exit the nearest return scope.
     val returnScope = new ScopedStack[String]
+    val breakScope = new ScopedStack[String]
+    val continueScope = new ScopedStack[String]
 
-    def withReturnScope(tpe: jst.Type)
-                       (body: => js.Tree)
-                       (implicit pos: Position): js.Tree =
-      returnScope.withValue(TextUtils.freshName("_return")) { label =>
-        js.Labeled(
-          js.LabelIdent(jsn.LabelName(label)),
-          tpe,
-          body
-        )
+    def withReturnScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+      returnScope.withValue(freshName("_return")) { label =>
+        js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
+      }
+
+    def withBreakScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+      breakScope.withValue(freshName("_break")) { label =>
+        js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
+      }
+
+    def withContinueScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+      continueScope.withValue(freshName("_continue")) { label =>
+        js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
       }
 
     // endregion
@@ -295,10 +298,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
       val jdtParameters = method.parameters.toArray.map(_.asInstanceOf[jdt.SingleVariableDeclaration]).toList
       val parameterTypeRefs = jdtParameters
-        .map(_.getType)
-        .map(toSJSTypeRef)
-      val resultType = toSJSType(method.getReturnType2)
-      val resultTypeRef = toSJSTypeRef(method.getReturnType2)
+        .map(_.getType.resolveBinding)
+        .map(sjsTypeRef)
+      val resultType = sjsType(method.getReturnType2.resolveBinding)
+      val resultTypeRef = sjsTypeRef(method.getReturnType2.resolveBinding)
 
       js.MethodDef(
         js.MemberFlags.empty.withNamespace(memberNamespace(method.getModifiers)),
@@ -312,7 +315,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           js.ParamDef(
             js.LocalIdent(jsn.LocalName(p.getName.getIdentifier)),
             NoOriginalName,
-            toSJSType(p.getType),
+            sjsType(p.getType.resolveBinding),
             mutable = !jdt.Modifier.isFinal(p.getModifiers),
             rest = p.isVarargs
           )
@@ -354,9 +357,23 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         and return to those, but I'm not sure of the semantics of that yet. Need
         to set up functional tests first.
          */
-        case s: jdt.BreakStatement => ???
+        case s: jdt.BreakStatement => Option(s.getLabel) match {
+          case Some(label) =>
+            js.Return(js.Undefined(), js.LabelIdent(jsn.LabelName(label.getIdentifier)))
+          case None =>
+            // Exit the nearest break scope
+            js.Return(js.Undefined(), js.LabelIdent(jsn.LabelName(breakScope.get)))
+        }
+
         case s: jdt.ConstructorInvocation => ???
-        case s: jdt.ContinueStatement => ???
+
+        case s: jdt.ContinueStatement => Option(s.getLabel) match {
+          case Some(label) =>
+            js.Return(js.Undefined(), js.LabelIdent(jsn.LabelName(label.getIdentifier)))
+          case None =>
+            // Exit the nearest continue scope
+            js.Return(js.Undefined(), js.LabelIdent(jsn.LabelName(continueScope.get)))
+        }
 
         case s: jdt.DoStatement =>
           js.DoWhile(genStatement(s.getBody), genExprValue(s.getExpression))
@@ -376,22 +393,24 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         case s: jdt.ForStatement =>
           js.Block(
             // Initializers
-            // TODO: JDT uses a lot of untyped lists. Maybe provide an implicit method to convert and type them?
             s.initializers.asScala[jdt.Expression]
               .map(genExprValue(_)) :+
 
               // Main loop
-              js.While(
-                genExprValue(s.getExpression),
-                js.Block(
-                  List(genStatement(s.getBody)) ++
+              withBreakScope(jst.NoType) {
+                js.While(
+                  genExprValue(s.getExpression),
+                  withContinueScope(jst.NoType) {
+                    js.Block(
+                      List(genStatement(s.getBody)) ++
 
-                    // Updaters
-                    s.updaters.asScala.map(_.asInstanceOf[jdt.Expression])
-                      .map(genExprValue(_))
-                      .toList
+                        // Updaters
+                        s.updaters.asScala[jdt.Expression]
+                          .map(genExprValue(_))
+                    )
+                  }
                 )
-              )
+              }
           )
 
         case s: jdt.IfStatement =>
@@ -423,8 +442,13 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           )
 
         case s: jdt.SuperConstructorInvocation => ???
-        case s: jdt.SwitchCase => ???
-        case s: jdt.SwitchStatement => ???
+
+        case s: jdt.SwitchCase =>
+          throw new JavaCompilationException("Encountered case outside of a switch statement")
+
+        case s: jdt.SwitchStatement =>
+          genSwitch(s.getExpression, s.statements.asScala[jdt.Statement])
+
         case s: jdt.SynchronizedStatement => ???
 
         case s: jdt.ThrowStatement => js.Throw(genExprValue(s.getExpression))
@@ -530,7 +554,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
         case e: jdt.CastExpression => js.AsInstanceOf(
           genExprValue(e.getExpression),
-          toSJSType(e.getType)
+          sjsType(e.getType.resolveBinding)
         )
 
         case e: jdt.CharacterLiteral => js.CharLiteral(e.charValue())
@@ -559,7 +583,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           ???
 
         case e: jdt.InstanceofExpression =>
-          js.IsInstanceOf(genExprValue(e.getLeftOperand), toSJSType(e.getRightOperand))
+          ???
+        //          js.IsInstanceOf(genExprValue(e.getLeftOperand), toSJSType(e.getRightOperand))
 
         case e: jdt.LambdaExpression => ???
 
@@ -650,7 +675,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         case e: jdt.PrefixExpression => ???
 
 
-
         case e: jdt.QualifiedName =>
           val vb = e.resolveBinding().asInstanceOf[jdt.IVariableBinding]
           if (isStatic(vb)) {
@@ -738,6 +762,123 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
       List(value)
     )(jst.NoType)
 
+    /**
+     * Generates a switch statement.
+     * Switches as expressions aren't supported yet.
+     */
+    def genSwitch(expression: jdt.Expression, statements: List[jdt.Statement])
+                 (implicit pos: Position): js.Tree = {
+      // TODO: If all cases end in break, emit a match node
+
+      // The switch expression will be evaluated once and stored in this var
+      val exprIdent = js.LocalIdent(jsn.LocalName(freshName("$sjsirSwitchExpr")))
+      val exprType = sjsType(expression.resolveTypeBinding)
+
+      // Flag to fall through to the next case. This is set if a case is entered.
+      val fallthroughIdent = js.LocalIdent(jsn.LocalName(freshName("$sjsirFallthrough")))
+
+      // Short-circuit an empty switch: evaluate its expression for side-effects
+      // and skip
+      if (statements.isEmpty) {
+        return js.VarDef(exprIdent, NoOriginalName, exprType, mutable = false,
+          genExprValue(expression))
+      }
+
+      // At this point, we expect the list of statements to have the format:
+      //   (SwitchCase NonSwitchCase*)+
+      // This is the only valid Java syntax, but check anyway for any JDT tomfoolery
+      if (!statements.head.isInstanceOf[jdt.SwitchCase])
+        throw new JavaCompilationException("The body of a non-empty switch must begin with a case or default")
+
+      // A list of CaseBlocks forms a logical representation of this switch
+      case class CaseBlock(expr: Seq[js.Tree], terminating: Boolean, body: js.Tree) {
+        val isDefault: Boolean = expr.isEmpty
+      }
+
+      /**
+       * Given a flat list of statements, some of which may be cases, split the
+       * statements into a list of CaseBlock objects that describe each case
+       * individually.
+       */
+      def splitCases(stats: List[jdt.Statement]): List[CaseBlock] = stats match {
+        case Nil => Nil
+        case (caseHeader: jdt.SwitchCase) :: rest =>
+          /*
+          Collect the statements for this case into caseStats.
+          moreCases will contain the remaining statements in the switch
+          starting with the next case, or an empty list.
+          If several cases appear one after another, all but the last will have
+          empty bodies and will fall through to the next.
+           */
+          val (caseStats, moreCases) = rest.span(!_.isInstanceOf[jdt.SwitchCase])
+
+          val terminating = /*caseHeader.isSwitchLabeledRule ||*/
+            containsTerminatingStatement(caseStats)
+
+          val caseBlock = CaseBlock(
+            // Multiple expressions are a preview feature; disable for now
+            // caseHeader.expressions.asScala[jdt.Expression].map(genExprValue(_)),
+            if (caseHeader.isDefault) Nil else Seq(genExprValue(caseHeader.getExpression)),
+
+            terminating,
+
+            // Body
+            js.Block({
+              // If the case may reach its end, indicate fallthrough
+              val setFallthrough = if (terminating) js.Skip()
+              else js.Assign(
+                js.VarRef(fallthroughIdent)(jst.BooleanType),
+                js.BooleanLiteral(value = true)
+              )
+
+              // If the case may reach the end but is a -> case (no fallthrough)
+              // then add a synthetic break
+              // This is disabled for the time being since -> cases are a
+              // preview feature in the most recent JDT.
+              val endBreak = js.Skip() /*if (!terminating && caseHeader.isSwitchLabeledRule)
+                js.Return(js.Undefined(), js.LabelIdent(jsn.LabelName(breakScope.get)))
+              else js.Skip()*/
+
+              setFallthrough :: caseStats.map(genStatement) ::: List(endBreak)
+            })
+          )
+
+          // Recurse
+          caseBlock :: splitCases(moreCases)
+
+        case _ =>
+          throw new JavaCompilationException("Could not parse switch body")
+      }
+
+      // Emit IR
+      // TODO: Emit a Match node if all cases in a switch terminate
+      //   You'll need to remove breaks if they are the last stat in a case.
+      withBreakScope(jst.NoType) {
+        val cases = splitCases(statements)
+        js.Block(
+          // Expression local
+          js.VarDef(exprIdent, NoOriginalName, exprType,
+            mutable = false, genExprValue(expression)),
+
+          // Fallthrough flag
+          js.VarDef(fallthroughIdent, NoOriginalName, jst.BooleanType,
+            mutable = true, js.BooleanLiteral(value = false)),
+
+          cases.foldRight[js.Tree](js.Skip()) { (caseBlock, acc) =>
+            js.If(
+              js.BinaryOp(
+                js.BinaryOp.Boolean_|,
+                js.VarRef(fallthroughIdent)(jst.BooleanType),
+                js.BooleanLiteral(value = true) /* TODO: Create equality */
+              ),
+              caseBlock.body,
+              acc
+            )(jst.NoType)
+          }
+        )
+      }
+    }
+
     // endregion
 
     // region Helper methods
@@ -758,33 +899,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
     }
 
     // endregion
-
-    def toSJSType(tpe: jdt.Type): jst.Type = tpe match {
-      case t: jdt.PrimitiveType => t.getPrimitiveTypeCode match {
-        case jdt.PrimitiveType.BOOLEAN => jst.BooleanType
-        case jdt.PrimitiveType.BYTE => jst.ByteType
-        case jdt.PrimitiveType.CHAR => jst.CharType
-        case jdt.PrimitiveType.DOUBLE => jst.DoubleType
-        case jdt.PrimitiveType.FLOAT => jst.FloatType
-        case jdt.PrimitiveType.INT => jst.IntType
-        case jdt.PrimitiveType.LONG => jst.LongType
-        case jdt.PrimitiveType.SHORT => jst.ShortType
-        case jdt.PrimitiveType.VOID => jst.NoType
-      }
-      case t: jdt.ArrayType =>
-        jst.ArrayType(jst.ArrayTypeRef(toSJSTypeRef(t.getElementType).asInstanceOf[jst.NonArrayTypeRef], t.getDimensions))
-      case t: jdt.SimpleType =>
-        jst.ClassType(jsn.ClassName(t.resolveBinding().getQualifiedName))
-    }
-
-    def toSJSTypeRef(tpe: jdt.Type): jst.TypeRef = tpe match {
-      case t: jdt.PrimitiveType => toSJSType(t).asInstanceOf[jst.PrimTypeWithRef].primRef
-      case t: jdt.ArrayType => jst.ArrayTypeRef(
-        toSJSTypeRef(t.getElementType).asInstanceOf[jst.NonArrayTypeRef],
-        t.getDimensions
-      )
-      case t: jdt.SimpleType => jst.ClassRef(jsn.ClassName(t.resolveBinding().getQualifiedName))
-    }
 
     def nameString(f: js.FieldDef): String = f.name.name.nameString
 

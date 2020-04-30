@@ -229,11 +229,17 @@ class TreesTest extends AnyFunSpec with BeforeAndAfter {
       val ast = ASTUtils.javaToSJS(
         """
           |class Test {
-          |  static int si = 3;
-          |  static int foo() { return si; }
+          |  static int main() {
+          |      switch (2) {
+          |          case 1: return 1;
+          |          case 2: return 2;
+          |          case 3: return 3;
+          |          default: return 10;
+          |      }
+          |  }
           |}
           |""".stripMargin)
-//      println(ast.head.show)
+      println(ast.head.show)
     }
   }
 }
