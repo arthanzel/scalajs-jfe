@@ -60,8 +60,8 @@ object TestUtils {
 
   def assertRun(javaCode: String, expectedOut: String): Unit = {
     // Remember to add \n to expectedOut
-    val ast = ASTUtils.javaToSJS(javaCode).head
-    val linked = Runner.link(ast, new ScalaConsoleLogger(Level.Error))
+    val asts = ASTUtils.javaToSJS(javaCode)
+    val linked = Runner.link(asts, new ScalaConsoleLogger(Level.Error), "Main")
 
     val jsEnv = new nodejs.NodeJSEnv()
     val input = Seq(Input.Script(linked))

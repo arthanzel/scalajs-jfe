@@ -11,7 +11,7 @@ scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-encoding", "ut
 libraryDependencies ++= Seq(
   "org.scala-lang" % "scala-library" % scalaVersion.value,
   "org.scala-lang" % "scala-reflect" % scalaVersion.value,
-  "org.eclipse.jdt" % "org.eclipse.jdt.core" % "3.20.0",
+  "org.eclipse.jdt" % "org.eclipse.jdt.core" % "3.21.0",
   "org.scala-js" % "scalajs-compiler_2.13.0" % scalaJSVersion,
   "org.scala-js" %% "scalajs-library" % scalaJSVersion,
   "org.scala-js" %% "scalajs-linker" % scalaJSVersion,

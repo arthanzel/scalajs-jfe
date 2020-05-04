@@ -5,6 +5,39 @@ import org.scalajs.ir.{Position, Names => jsn, Trees => js, Types => jst}
 import org.scalajs.jfe.JavaCompilationException
 
 object TypeUtils {
+  val HijackedClasses: Set[String] = Set("java.lang.Boolean",
+    "java.lang.Character", "java.lang.Byte", "java.lang.Short",
+    "java.lang.Integer", "java.lang.Long", "java.lang.Float",
+    "java.lang.Double", "java.lang.String")
+  val JDKStringType: jst.ClassType = jst.ClassType(jsn.ClassName("java.util.String"))
+  val JDKStringRef: jst.TypeRef = sjsTypeRef(JDKStringType)
+
+  private val BoxedByteType = jst.ClassType(jsn.ClassName("java.lang.Byte"))
+  private val BoxedCharType = jst.ClassType(jsn.ClassName("java.lang.Character"))
+  private val BoxedShortType = jst.ClassType(jsn.ClassName("java.lang.Short"))
+  private val BoxedIntType = jst.ClassType(jsn.ClassName("java.lang.Integer"))
+  private val BoxedLongType = jst.ClassType(jsn.ClassName("java.lang.Long"))
+  private val BoxedFloatType = jst.ClassType(jsn.ClassName("java.lang.Float"))
+  private val BoxedDoubleType = jst.ClassType(jsn.ClassName("java.lang.Double"))
+  private val BoxedBooleanType = jst.ClassType(jsn.ClassName("java.lang.Boolean"))
+
+  private val unboxingMap: Map[jst.Type, jst.PrimTypeWithRef] = Map(
+    "Boolean" -> jst.BooleanType,
+    "Byte" -> jst.ByteType,
+    "Character" -> jst.CharType,
+    "Short" -> jst.ShortType,
+    "Integer" -> jst.IntType,
+    "Long" -> jst.LongType,
+    "Float" -> jst.FloatType,
+    "Double" -> jst.DoubleType,
+  ).map { case (cls, tpe) =>
+    jst.ClassType(jsn.ClassName(s"java.lang.$cls")) -> tpe
+  }
+  private val boxingMap: Map[jst.Type, jst.ClassType] =
+    unboxingMap.map(x => (x._2, x._1.asInstanceOf[jst.ClassType]))
+  private val boxableTypes = boxingMap.keySet
+  private val unboxableTypes = unboxingMap.keySet
+
   def isStatic(m: jdt.IBinding): Boolean =
     jdt.Modifier.isStatic(m.getModifiers)
 
@@ -71,10 +104,13 @@ object TypeUtils {
     }
   }
 
-  def sjsTypeRef(t: jst.Type): jst.TypeRef = t match {
+  def sjsTypeRef(tpe: jst.Type): jst.TypeRef = tpe match {
+    case t: jst.ArrayType => t.arrayTypeRef
     case t: jst.PrimTypeWithRef => t.primRef
     case t: jst.ClassType => jst.ClassRef(t.className)
-    case _ => ???
+    case jst.AnyType => jst.ClassRef(jsn.ClassName("java.lang.Object"))
+    case _ =>
+      throw new JavaCompilationException(s"Can't compute a typeref for $tpe")
   }
 
   def cast(tree: js.Tree, to: jst.Type, isAssignment: Boolean = false)
@@ -87,11 +123,68 @@ object TypeUtils {
 
     val from = tree.tpe
     if (from == to) return tree
+    if (from == jst.StringType && to == jst.ClassType(jsn.ClassName("java.lang.String"))) return tree
 
-    if (to.isInstanceOf[jst.PrimType]) return genConversion(tree.tpe, to, tree)
+    if (from.isInstanceOf[jst.PrimType] && to.isInstanceOf[jst.PrimType]) return adaptPrimitive(tree, to)
 
+    // Stringify
+//    if (to == jst.StringType || to == JDKStringType) return from match {
+//      case _: jst.ClassType =>
+//        js.Apply(
+//          js.ApplyFlags.empty,
+//          tree,
+//          js.MethodIdent(jsn.MethodName("toString", Nil, JDKStringRef)),
+//          Nil
+//        )(JDKStringType)
+//      case _: jst.PrimType =>
+//        // TODO: Stringify primitives
+//        tree
+//    }
+
+    /*
+    Boxing:
+    ScalaJS automatically boxes primitive types, but we need to make sure that
+    they are cast to the right primitive first.
+    TODO: This doesn't match Java's semantics exactly. E.g. it allows narrowing
+      conversions in assignments or method calls.
+     */
+    if (boxableTypes.contains(from) && unboxableTypes.contains(to))
+      return adaptPrimitive(tree, unboxingMap(to))
+
+    /*
+    Unboxing needs to be done explicitly.
+     */
+    if (boxableTypes.contains(to) && unboxableTypes.contains(from))
+      return adaptPrimitive(js.AsInstanceOf(tree, unboxingMap(from)), to)
+
+    //    ???
+    // TODO: Specify explicitly casting cases
     tree
   }
+
+  // region Boxing
+
+  def tryBox(tree: js.Tree, to: jst.Type)
+            (implicit pos: Position): Option[js.Tree] = {
+    try {
+      // ScalaJS boxes automatically, but primitives must be coerced to the
+      // proper type first.
+      val primType = unboxingMap(to)
+      Some(adaptPrimitive(tree, primType))
+    } catch {
+      // Tree can't be boxed
+      case _: NoSuchElementException => None
+    }
+  }
+
+  // endregion
+
+  def tryUnbox(tree: js.Tree, to: jst.Type)
+              (implicit pos: Position): Option[js.Tree] =
+    unboxingMap.get(tree.tpe) match {
+      case Some(to) => Some(js.AsInstanceOf(tree, to))
+      case _ => None
+    }
 
   private def literalLongValue(lit: js.Literal): Long = lit match {
     case x: js.ByteLiteral => x.value
@@ -103,8 +196,9 @@ object TypeUtils {
   }
 
   private def staticNarrowingCast(lit: js.Literal, to: jst.Type)
-                         (implicit pos: Position): js.Literal = {
+                                 (implicit pos: Position): js.Literal = {
     val longValue = literalLongValue(lit)
+
     def ensureBound(value: Long, min: Long, max: Long): Unit = {
       if (value < min || value > max) {
         throw new JavaCompilationException(s"Lossy conversion: $value does not fit in [$min, $max]")
@@ -125,7 +219,7 @@ object TypeUtils {
   }
 
   private def staticWideningCast(t: js.Literal, to: jst.Type)
-                        (implicit pos: Position): js.Literal = (t, to) match {
+                                (implicit pos: Position): js.Literal = (t, to) match {
     case (x: js.FloatLiteral, jst.DoubleType) => js.DoubleLiteral(x.value)
 
     case (x: js.LongLiteral, jst.DoubleType) => js.DoubleLiteral(x.value)
@@ -166,9 +260,11 @@ object TypeUtils {
 
   // region Code from Scala.js
 
-  private def genConversion(from: jst.Type, to: jst.Type, value: js.Tree)(
+  private def adaptPrimitive(value: js.Tree, to: jst.Type)(
     implicit pos: Position): js.Tree = {
     import js.UnaryOp._
+
+    val from = value.tpe
 
     if (from == to || from == jst.NothingType) {
       value
@@ -176,20 +272,20 @@ object TypeUtils {
       throw new AssertionError(s"Invalid genConversion from $from to $to")
     } else {
       def intValue = (from: @unchecked) match {
-        case jst.IntType    => value
-        case jst.CharType   => js.UnaryOp(CharToInt, value)
-        case jst.ByteType   => js.UnaryOp(ByteToInt, value)
-        case jst.ShortType  => js.UnaryOp(ShortToInt, value)
-        case jst.LongType   => js.UnaryOp(LongToInt, value)
-        case jst.FloatType  => js.UnaryOp(DoubleToInt, js.UnaryOp(FloatToDouble, value))
+        case jst.IntType => value
+        case jst.CharType => js.UnaryOp(CharToInt, value)
+        case jst.ByteType => js.UnaryOp(ByteToInt, value)
+        case jst.ShortType => js.UnaryOp(ShortToInt, value)
+        case jst.LongType => js.UnaryOp(LongToInt, value)
+        case jst.FloatType => js.UnaryOp(DoubleToInt, js.UnaryOp(FloatToDouble, value))
         case jst.DoubleType => js.UnaryOp(DoubleToInt, value)
       }
 
       def doubleValue = from match {
         case jst.DoubleType => value
-        case jst.FloatType  => js.UnaryOp(FloatToDouble, value)
-        case jst.LongType   => js.UnaryOp(LongToDouble, value)
-        case _                => js.UnaryOp(IntToDouble, intValue)
+        case jst.FloatType => js.UnaryOp(FloatToDouble, value)
+        case jst.LongType => js.UnaryOp(LongToDouble, value)
+        case _ => js.UnaryOp(IntToDouble, intValue)
       }
 
       (to: @unchecked) match {

@@ -29,14 +29,23 @@ object Runner {
     Await.result(future, Duration.Inf)
   }
 
-  def link(classDef: ClassDef, logger: Logger, mainClass: String = "Main"): Path = {
-    val mainIRFile = new ClassDefIRFileImpl("main.sjsir", None, classDef)
-    val allIRFiles = libraryIRFiles :+ mainIRFile
+  def link(classDef: ClassDef, logger: Logger, mainClass: String): Path =
+    link(Seq(classDef), logger, mainClass)
+
+  def link(classDefs: Seq[ClassDef], logger: Logger, mainClass: String): Path = {
+    val irFiles = classDefs.map { classDef =>
+      new ClassDefIRFileImpl(
+        s"${TextUtils.freshName("irfile")}.sjsir",
+        None,
+        classDef)
+    }
+
+    val allIRFiles = libraryIRFiles ++ irFiles
     val config = StandardConfig().withCheckIR(true).withOptimizer(false)
     val linker = StandardImpl.linker(config)
 
-//    val output = Jimfs.newFileSystem().getPath("output.js")
-    val output = new java.io.File("output.js").toPath
+    val output = Jimfs.newFileSystem().getPath("output.js")
+//    val output = new java.io.File("output.js").toPath
     val future = linker.link(allIRFiles,
       List(ModuleInitializer.mainMethod(mainClass, "main")),
       LinkerOutput(PathOutputFile(output)), logger)

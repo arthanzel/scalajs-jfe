@@ -239,7 +239,6 @@ class TreesTest extends AnyFunSpec with BeforeAndAfter {
           |  }
           |}
           |""".stripMargin)
-      println(ast.head.show)
     }
   }
 }

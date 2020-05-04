@@ -10,3 +10,6 @@ Scala requires that classes be constructible, directly or indirectly, via one co
 
 Binary ops:
 Scala does not have ++ or -- operators. Further, arithmetic operators are implemented as methods that return a single datatype, usually an int, so something like `var b: Byte = 1; b+= 1` is illegal because it tries to assign an Int to a Byte. Further, ++ and -- operators may return values, which causes different code to be emitted depending on whether the operator is an expression or statement.
+
+Imports:
+Work out of the box since JDT resolves types

@@ -36,8 +36,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
     // region State variables
 
     var qualifiedThis: String = ""
-    lazy val thisClassName: jsn.ClassName = jsn.ClassName(qualifiedThis)
-    lazy val thisClassType: jst.ClassType = jst.ClassType(thisClassName)
+    def thisClassName: jsn.ClassName = jsn.ClassName(qualifiedThis)
+    def thisClassType: jst.ClassType = jst.ClassType(thisClassName)
     lazy val staticInitializerIdent = js.MethodIdent(
       jsn.MethodName(TextUtils.freshName("$sjsirStaticInitializer"), Nil, jst.VoidRef)
     )(NoPosition)
@@ -526,15 +526,17 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
             throw new IllegalArgumentException("Java array must have dimensions or an initializer")
           }
 
-        case e: jdt.ArrayInitializer => js.ArrayValue(
-          sjsArrayTypeRef(e.resolveTypeBinding),
-          e.expressions.toArray
-            .map(_.asInstanceOf[jdt.Expression])
-            .map(genExprValue(_))
-            .toList
-        )
+        case e: jdt.ArrayInitializer =>
+          val arrayType = sjsType(e.resolveTypeBinding).asInstanceOf[jst.ArrayType]
+          val baseType = sjsType(e.resolveTypeBinding.getElementType)
+          js.ArrayValue(
+            sjsTypeRef(arrayType).asInstanceOf[jst.ArrayTypeRef],
+            e.expressions.asScala[jdt.Expression]
+              .map(x => cast(genExprValue(x), baseType))
+          )
 
         case e: jdt.Assignment =>
+          // TODO: Support arithmetic assignment operators
           val lhs = genExprValue(e.getLeftHandSide)
           lhs match {
             case sel: js.ApplyStatic =>
@@ -559,7 +561,33 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
         case e: jdt.CharacterLiteral => js.CharLiteral(e.charValue())
 
-        case e: jdt.ClassInstanceCreation => ???
+        case e: jdt.ClassInstanceCreation =>
+          // TODO: Support anonymous class construction
+          val mb = e.resolveConstructorBinding
+          val className = jsn.ClassName(e.getType.resolveBinding.getQualifiedName)
+          val paramTypes = mb.getParameterTypes.map(sjsType)
+          val args = e.arguments.asScala[jdt.Expression]
+            .map(genExprValue(_))
+            .zip(paramTypes)
+            .map { case (arg, targetType) => cast(arg, targetType) }
+          val isHijacked = HijackedClasses.contains(className.nameString)
+          val methodIdent = js.MethodIdent(jsn.MethodName(
+            if (isHijacked) "new" else "<init>",
+            mb.getParameterTypes.map(sjsTypeRef).toList,
+            if (isHijacked) sjsTypeRef(mb.getDeclaringClass) else jst.VoidRef
+          ))
+          val tpe = jst.ClassType(className)
+
+          if (isHijacked) {
+            // Hijacked classes (primitive boxes and String) are constructed
+            // with the static ::new()
+            js.ApplyStatic(js.ApplyFlags.empty, className, methodIdent, args)(tpe)
+          }
+          else {
+            // Regular classes are constructed as normal
+            js.New(className, methodIdent, args)
+          }
+
 
         case e: jdt.ConditionalExpression => js.If(
           genExprValue(e.getExpression),
@@ -583,22 +611,28 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           ???
 
         case e: jdt.InstanceofExpression =>
-          ???
-        //          js.IsInstanceOf(genExprValue(e.getLeftOperand), toSJSType(e.getRightOperand))
+          js.IsInstanceOf(
+            genExprValue(e.getLeftOperand),
+            sjsType(e.getRightOperand.resolveBinding())
+          )
 
         case e: jdt.LambdaExpression => ???
 
         case e: jdt.MethodInvocation =>
           val mb = e.resolveMethodBinding
 
+          val paramTypes = mb.getParameterTypes.map(sjsType)
           val ident = js.MethodIdent(jsn.MethodName(
             e.getName.getIdentifier,
-            mb.getParameterTypes.map(sjsTypeRef).toList,
+            paramTypes.map(sjsTypeRef).toList,
             sjsTypeRef(mb.getReturnType)
           ))
           val args = e.arguments().asScala[jdt.Expression]
             .map(genExprValue(_))
-          val tpe = sjsType(e.resolveTypeBinding)
+            .zip(paramTypes)
+            .map { case (arg, tpe) => cast(arg, tpe) }
+          val tpe = sjsType(mb.getReturnType)
+          //          println(mb.getParameterTypes.toList, args.map(_.tpe))
 
           if (isStatic(mb)) {
             // Static call
@@ -714,7 +748,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
               }
               else js.VarRef(
                 js.LocalIdent(jsn.LocalName(name))
-              )(tpe)
+              )(sjsType(v.getType))
             case p: jdt.IMethodBinding => ???
             case t: jdt.ITypeBinding =>
               ???
@@ -726,7 +760,11 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         case e: jdt.SuperMethodInvocation => ???
         case e: jdt.SwitchExpression => ???
 
-        case e: jdt.ThisExpression => thisNode
+        case e: jdt.ThisExpression =>
+          val qualifier = Option(e.getQualifier)
+            .map(_.getFullyQualifiedName)
+            .getOrElse(qualifiedThis)
+          js.This()(jst.ClassType(jsn.ClassName(qualifier)))
 
         case e: jdt.TypeLiteral => ???
         case e: jdt.TypeMethodReference => ???
@@ -903,13 +941,12 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
     def nameString(f: js.FieldDef): String = f.name.name.nameString
 
     // TODO: Handle imports
-    compilationUnit.types
-      .toArray
+    compilationUnit.types.asScala[jdt.AbstractTypeDeclaration]
       .flatMap {
         case anno: jdt.AnnotationTypeDeclaration => ???
         case enum: jdt.EnumDeclaration => ???
         case intf: jdt.TypeDeclaration if intf.isInterface => ???
         case cls: jdt.TypeDeclaration => genClass(cls)
-      }.toList
+      }
   }
 }

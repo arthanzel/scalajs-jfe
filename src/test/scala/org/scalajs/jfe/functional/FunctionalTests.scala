@@ -6,6 +6,7 @@ import org.scalatest.BeforeAndAfter
 import org.scalatest.funspec.AnyFunSpec
 
 class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
+
   import org.scalajs.jfe.TestUtils._
 
   before {
@@ -35,37 +36,59 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
     }
   }
 
+  describe("Type features:") {
+    it("boxes assignments") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        Boolean bool = true;
+          |        Byte b = 10;
+          |        Short s = 11;
+          |        Integer i = 12;
+          |        Long l = 13;
+          |        System.out.println(bool);
+          |        System.out.println(b);
+          |        System.out.println(s);
+          |
+          |        byte b2 = b;
+          |        System.out.println(b2);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(true, 10, 11, 10))
+    }
+  }
+
   describe("Language features:") {
     describe("Flow control:") {
-    it("handles if-else statements") {
-      val src =
-        """class Main {
-          |    public static void main() {
-          |        if (true) System.out.println("true 1");
-          |        else System.out.println("false 1");
-          |        if (false) System.out.println("true 2");
-          |        else System.out.println("false 2");
-          |    }
-          |}""".stripMargin
-      assertRun(src, Seq("true 1", "false 2"))
-    }
+      it("handles if-else statements") {
+        val src =
+          """class Main {
+            |    public static void main() {
+            |        if (true) System.out.println("true 1");
+            |        else System.out.println("false 1");
+            |        if (false) System.out.println("true 2");
+            |        else System.out.println("false 2");
+            |    }
+            |}""".stripMargin
+        assertRun(src, Seq("true 1", "false 2"))
+      }
 
-    it("handles if-elseif-else statements") {
-      val src =
-        """class Main {
-          |    public static void main() {
-          |        if (false) System.out.println("one");
-          |        else if (true) System.out.println("two");
-          |        else System.out.println("three");
-          |    }
-          |}""".stripMargin
-      assertRun(src, "two")
-    }
+      it("handles if-elseif-else statements") {
+        val src =
+          """class Main {
+            |    public static void main() {
+            |        if (false) System.out.println("one");
+            |        else if (true) System.out.println("two");
+            |        else System.out.println("three");
+            |    }
+            |}""".stripMargin
+        assertRun(src, "two")
+      }
 
       it("handles simple for loops") {
 
       }
-  }
+    }
 
     it("handles literals") {
       val src =
@@ -80,6 +103,163 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    }
           |}""".stripMargin
       assertRun(src, Seq(10, 11, 12.5, 13.5, true, '@'))
+    }
+  }
+
+  describe("Instances:") {
+    it("Constructs JDK objects") {
+      val src =
+        """import java.util.Random;
+          |class Main {
+          |    public static void main() {
+          |        String x = new String("A string");
+          |        System.out.println(x);
+          |        Random r = new Random(1234);
+          |        System.out.println(r.nextInt(10));
+          |        Object o = new Object();
+          |        System.out.println(o.toString());
+          |        //Integer i = new Integer(10);
+          |        //System.out.println(new Integer(i.hashCode()));
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq("A string", 8, "java.lang.Object@1"))
+    }
+
+    it("Constructs objects") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        String x = new String("A string");
+          |        System.out.println(x);
+          |    }
+          |}""".stripMargin
+      assertRun(src, "A string")
+    }
+
+    it("Declares instance fields") {
+      val src =
+        """class Main {
+          |    public int i = 10;
+          |    public String s = "Instance string";
+          |    public static void main() {
+          |        Main m = new Main();
+          |        System.out.println(m.i);
+          |        System.out.println(m.s);
+          |    }
+          |}
+          |""".stripMargin
+      assertRun(src, Seq(10, "Instance string"))
+    }
+
+    it("Sets instance fields") {
+      val src =
+        """class Main {
+          |    public int i = 10;
+          |    public String s = "Instance string";
+          |    public static void main() {
+          |        Main m = new Main();
+          |        System.out.println(m.i);
+          |        System.out.println(m.s);
+          |        m.i = 20;
+          |        m.s = "Changed string";
+          |        System.out.println(m.i);
+          |        System.out.println(m.s);
+          |    }
+          |}
+          |""".stripMargin
+      assertRun(src, Seq(10, "Instance string", 20, "Changed string"))
+    }
+
+    it("Calls instance methods") {
+      val src =
+        """class Main {
+          |    public int inst() {
+          |        System.out.println("inst");
+          |        return 10;
+          |    }
+          |
+          |    public static void main() {
+          |        Main m = new Main();
+          |        System.out.println("main");
+          |        System.out.println(m.inst());
+          |    }
+          |}
+          |""".stripMargin
+      assertRun(src, Seq("main", "inst", 10))
+    }
+
+    it("Calls different constructors") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        String s1 = new String("from literal");
+          |        String s2 = new String(s1);
+          |        String s3 = new String(new byte[] { 98, 121, 116, 101, 115 });
+          |        String s4 = new String(new char[] { 'c', 'h', 'a', 'r', 's' });
+          |        System.out.println(s1);
+          |        System.out.println(s2);
+          |        System.out.println(s3);
+          |        System.out.println(s4);
+          |    }
+          |}
+          |""".stripMargin
+      assertRun(src, Seq("from literal", "from literal", "bytes", "chars"))
+    }
+
+    it("Accesses members from other custom classes") {
+      val src =
+        """class Other {
+          |    public int number = 3;
+          |    public int method(int x) {
+          |         System.out.println("Other#method");
+          |         System.out.println(x);
+          |         return 10;
+          |     }
+          |}
+          |class Main {
+          |    public static void main() {
+          |        Other other = new Other();
+          |        System.out.println(other.number);
+          |        other.number = 4;
+          |        System.out.println(other.number);
+          |        System.out.println(other.method(5));
+          |    }
+          |}
+          |
+          |""".stripMargin
+      assertRun(src, Seq(3, 4, "Other#method", 5, 10))
+    }
+
+    it("Inherits stuff") {
+      val src =
+        """class Base {
+          |    public String cat = "cat";
+          |    public String dog = "dog";
+          |    public String say() { return "meow"; }
+          |}
+          |class Main extends Base {
+          |    public String dog = "poodle";
+          |    public String say() { return "bark"; }
+          |    public static void main() {
+          |        Base b = new Base();
+          |        System.out.println(b.cat);
+          |        System.out.println(b.dog);
+          |        System.out.println(b.say());
+          |        Main m = new Main();
+          |        System.out.println(m.cat);
+          |        System.out.println(m.dog);
+          |        System.out.println(m.say());
+          |        Base mb = new Main();
+          |        System.out.println(mb.cat);
+          |        System.out.println(mb.dog);
+          |        System.out.println(mb.say());
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(
+        "cat", "dog", "meow",
+        "cat", "poodle", "bark",
+        "cat", "dog", "bark"
+      ))
     }
   }
 
