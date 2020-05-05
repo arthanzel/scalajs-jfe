@@ -107,7 +107,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
   }
 
   describe("Instances:") {
-    it("Constructs JDK objects") {
+    it("constructs JDK objects") {
       val src =
         """import java.util.Random;
           |class Main {
@@ -125,7 +125,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq("A string", 8, "java.lang.Object@1"))
     }
 
-    it("Constructs objects") {
+    it("constructs objects") {
       val src =
         """class Main {
           |    public static void main() {
@@ -136,7 +136,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, "A string")
     }
 
-    it("Declares instance fields") {
+    it("declares instance fields") {
       val src =
         """class Main {
           |    public int i = 10;
@@ -151,7 +151,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq(10, "Instance string"))
     }
 
-    it("Sets instance fields") {
+    it("sets instance fields") {
       val src =
         """class Main {
           |    public int i = 10;
@@ -170,7 +170,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq(10, "Instance string", 20, "Changed string"))
     }
 
-    it("Calls instance methods") {
+    it("calls instance methods") {
       val src =
         """class Main {
           |    public int inst() {
@@ -188,7 +188,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq("main", "inst", 10))
     }
 
-    it("Calls different constructors") {
+    it("calls different constructors") {
       val src =
         """class Main {
           |    public static void main() {
@@ -206,7 +206,71 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq("from literal", "from literal", "bytes", "chars"))
     }
 
-    it("Accesses members from other custom classes") {
+    it("calls a custom top-level constructor") {
+      val src =
+        """
+          |class Main {
+          |    int field = 10;
+          |    int field2 = 20;
+          |    public Main(int i) {
+          |        this.field2 = i;
+          |        System.out.println("zero");
+          |    }
+          |    public static void main() {
+          |       Main a = new Main(30);
+          |       System.out.println(a.field);
+          |       System.out.println(a.field2);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq("zero", 10, 30))
+    }
+
+    it("calls a custom top-level constructor calling implicit super()") {
+      val src =
+        """
+          |class Main {
+          |    int field = 10;
+          |    int field2 = 20;
+          |    public Main(int i) {
+          |        super();
+          |        this.field2 = i;
+          |        System.out.println("one");
+          |    }
+          |    public static void main() {
+          |       Main a = new Main(30);
+          |       System.out.println(a.field);
+          |       System.out.println(a.field2);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq("one", 10, 30))
+    }
+
+    it("calls a custom top-level constructor calling co-constructor") {
+      val src =
+        """
+          |class Main {
+          |    int field = 10;
+          |    int field2 = 20;
+          |    int field3 = 30;
+          |    public Main(int i, int j) {
+          |        this(i);
+          |        this.field3 = j;
+          |    }
+          |    public Main(int i) {
+          |        this.field2 = i;
+          |        System.out.println("zero");
+          |    }
+          |    public static void main() {
+          |       Main a = new Main(30, 40);
+          |       System.out.println(a.field);
+          |       System.out.println(a.field2);
+          |       System.out.println(a.field3);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq("zero", 10, 30, 40))
+    }
+
+    it("accesses members from other custom classes") {
       val src =
         """class Other {
           |    public int number = 3;
@@ -230,7 +294,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq(3, 4, "Other#method", 5, 10))
     }
 
-    it("Inherits stuff") {
+    it("inherits stuff") {
       val src =
         """class Base {
           |    public String cat = "cat";
@@ -260,6 +324,40 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
         "cat", "poodle", "bark",
         "cat", "dog", "bark"
       ))
+    }
+
+    it("calls super fields and methods") {
+      val src =
+        """class A {
+          |    public String field = "fieldA";
+          |    public String method() { return "methodA"; }
+          |}
+          |class B extends A {
+          |    public String field = "fieldB";
+          |    public String method() { return "methodB"; }
+          |    public String superField() { return super.field; }
+          |    public String superMethod() { return super.method(); }
+          |}
+          |class Main {
+          |    public static void main() {
+          |        B b = new B();
+          |        System.out.println(b.field);
+          |        System.out.println(b.method());
+          |        System.out.println(b.superField());
+          |        System.out.println(b.superMethod());
+          |    }
+          |}
+          |""".stripMargin
+      val scala =
+        """
+          |object O {
+          |  new C().method()
+          |}
+          |class C {
+          |  def method() = super.hashCode()
+          |}
+          |""".stripMargin
+      assertRun(src, Seq("fieldB", "methodB", "fieldA", "methodA"))
     }
   }
 

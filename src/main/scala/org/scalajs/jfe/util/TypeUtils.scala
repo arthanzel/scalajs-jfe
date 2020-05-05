@@ -41,6 +41,9 @@ object TypeUtils {
   def isStatic(m: jdt.IBinding): Boolean =
     jdt.Modifier.isStatic(m.getModifiers)
 
+  def isMutable(vb: jdt.IVariableBinding): Boolean =
+    !jdt.Modifier.isFinal(vb.getModifiers) && !vb.isEffectivelyFinal
+
   def memberNamespace(m: Int): js.MemberNamespace = {
     import jdt.Modifier
 
