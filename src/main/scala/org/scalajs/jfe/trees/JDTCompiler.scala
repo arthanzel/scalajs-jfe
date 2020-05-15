@@ -4,7 +4,8 @@ import org.scalajs.jfe.util.TypeUtils._
 import org.eclipse.jdt.core.{dom => jdt}
 import org.scalajs.ir.Trees.OptimizerHints
 import org.scalajs.ir.{ClassKind, OriginalName, Position, Names => jsn, Trees => js, Types => jst}
-import org.scalajs.jfe.{JavaCompilationException, TextUtils}
+import org.scalajs.jfe.JavaCompilationException
+import org.scalajs.jfe.util.TextUtils
 
 object JDTCompiler {
 
@@ -17,8 +18,13 @@ object JDTCompiler {
   private val WithConstructorNS = js.MemberFlags.empty.withNamespace(js.MemberNamespace.Constructor)
 
   def apply(compilationUnit: jdt.CompilationUnit): List[js.ClassDef] =
-    new JDTCompiler(compilationUnit).gen()
+    new JDTCompiler(compilationUnit, null).gen()
 
+  /**
+   * Terminating statements are statements that certainly cause the containing
+   * block to exit prematurely. If a block contains one of these as an immediate
+   * child, some of its code can be optimized.
+   */
   val terminatingStatements: Set[Class[_ <: jdt.Statement]] = Set(
     classOf[jdt.ReturnStatement],
     classOf[jdt.BreakStatement],
@@ -27,22 +33,6 @@ object JDTCompiler {
 
   def containsTerminatingStatement(stats: List[jdt.Statement]): Boolean =
     stats.exists(stat => terminatingStatements.contains(stat.getClass))
-
-  //  def genMethodIdent(name: String)
-
-  def genConstructorIdent(mb: jdt.IMethodBinding)
-                         (implicit pos: Position): js.MethodIdent =
-    js.MethodIdent(
-      jsn.MethodName(
-        "<init>",
-        mb.getParameterTypes.map(sjsTypeRef).toList,
-        jst.VoidRef
-      )
-    )
-
-  def genConstructorIdent(method: jdt.MethodDeclaration)
-                         (implicit pos: Position): js.MethodIdent =
-    genConstructorIdent(method.resolveBinding)
 
   def genMethodParams(method: jdt.MethodDeclaration)
                      (implicit pos: Position): List[js.ParamDef] =
@@ -56,68 +46,82 @@ object JDTCompiler {
       )
     }
 
-  def genMethodArgs(methodBinding: jdt.IMethodBinding, args: Seq[js.Tree])
-                   (implicit pos: Position): List[js.Tree] = {
-    val paramTypes = methodBinding.getParameterTypes.map(sjsType)
-    args.zip(paramTypes)
-      .map { case (arg, tpe) => cast(arg, tpe) }
-      .toList
+  /**
+   * Convenience method to throw an NPE. Used in routines that have runtime
+   * semantics, like null-checking the `synchronized` expression.
+   */
+  def genThrowNPE(implicit pos: Position): js.Throw = {
+    js.Throw(js.New(
+      jsn.ClassName("java.lang.NullPointerException"),
+      js.MethodIdent(jsn.MethodName.constructor(Nil)),
+      Nil
+    ))
   }
 }
 
-// Make the compiler a class so that it stores state information more easily
-private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
+/**
+ * The JDTCompiler class compiles a single JDT type definition into SJSIR code.
+ * TODO: Make the class actually do this
+ */
+private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
+                          typeDef: jdt.AbstractTypeDeclaration) {
 
   import JDTCompiler._
   import TreeHelpers._
-  import TextUtils.freshName
+  import org.scalajs.jfe.util.TextUtils.freshName
+
+  // region State stuff
+
+  def packageName: Option[String] = {
+    if (compilationUnit.getPackage == null) return None
+    Some(compilationUnit.getPackage.getName.getFullyQualifiedName)
+  }
+
+  def packageName(name: String): String = {
+    Seq(packageName, Some(name)).flatten.mkString(".")
+  }
+
+  var qualifiedThis: String = ""
+  def thisClassName: jsn.ClassName = jsn.ClassName(qualifiedThis)
+  def thisClassType: jst.ClassType = jst.ClassType(thisClassName)
+
+  def thisNode(implicit pos: Position): js.This = js.This()(thisClassType)
+
+  lazy val staticInitializerIdent = js.MethodIdent(
+    jsn.MethodName(TextUtils.freshName("$sjsirStaticInitializer"), Nil, jst.VoidRef)
+  )(NoPosition)
+
+  // Return scopes are created on every method or function definition.
+  // Return statements always exit the nearest return scope.
+  val returnScope = new ScopedStack[String]
+  val breakScope = new ScopedStack[String]
+  val continueScope = new ScopedStack[String]
+
+  def withReturnScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+    returnScope.withValue(freshName("_return")) { label =>
+      js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
+    }
+
+  def withBreakScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+    breakScope.withValue(freshName("_break")) { label =>
+      js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
+    }
+
+  def withContinueScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+    continueScope.withValue(freshName("_continue")) { label =>
+      js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
+    }
+
+  // endregion
 
   def gen(): List[js.ClassDef] = {
-    // region State variables
-
-    var qualifiedThis: String = ""
-
-    def thisClassName: jsn.ClassName = jsn.ClassName(qualifiedThis)
-
-    def thisClassType: jst.ClassType = jst.ClassType(thisClassName)
-
-    lazy val staticInitializerIdent = js.MethodIdent(
-      jsn.MethodName(TextUtils.freshName("$sjsirStaticInitializer"), Nil, jst.VoidRef)
-    )(NoPosition)
-
-    def thisNode(implicit pos: Position): js.This = js.This()(thisClassType)
-
-    // Return scopes are created on every method or function definition.
-    // Return statements always exit the nearest return scope.
-    val returnScope = new ScopedStack[String]
-    val breakScope = new ScopedStack[String]
-    val continueScope = new ScopedStack[String]
-
-    def withReturnScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
-      returnScope.withValue(freshName("_return")) { label =>
-        js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
-      }
-
-    def withBreakScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
-      breakScope.withValue(freshName("_break")) { label =>
-        js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
-      }
-
-    def withContinueScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
-      continueScope.withValue(freshName("_continue")) { label =>
-        js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
-      }
-
-    // endregion
-
-    // Body of the gen method is at the bottom
 
     // region Generation methods
 
     def genClass(cls: jdt.TypeDeclaration): Seq[js.ClassDef] = {
       implicit val position: Position = getPosition(cls)
 
-      qualifiedThis = qualifyName(cls.getName.getIdentifier)
+      qualifiedThis = packageName(cls.getName.getIdentifier)
       val superClassName: String = Option(cls.getSuperclassType)
         .map(_.resolveBinding.getQualifiedName)
         .orElse(Some("java.lang.Object"))
@@ -141,10 +145,24 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           jdtInstanceFields)).toSeq
 
       // Generate static accessors and initializers
-      val staticSynthetics: Seq[js.MemberDef] = if (!jdtStaticFields.isEmpty) (
-        sjsFields.flatMap(f => genStaticAccessors(f, staticInitializerIdent)) ++
-          genStaticInitializer(jdtStaticFields, staticInitializerIdent)
-        ) else Nil
+      val staticSynthetics: Seq[js.MemberDef] =
+        if (!jdtStaticFields.isEmpty) {
+          val accessors = sjsFields.flatMap(f => genStaticAccessors(f, staticInitializerIdent))
+
+          // Initializers are called in the order by which they appear in the
+          // code, so we have no choice but to consider both FieldDeclaration
+          // and Initializer types at once
+          val jdtInitializers: Seq[jdt.BodyDeclaration] = cls.bodyDeclarations
+            .asScala[jdt.BodyDeclaration]
+            .filter {
+              case _: jdt.FieldDeclaration => true
+              case _: jdt.Initializer => true
+              case _ => false
+            }
+
+          accessors ++ genStaticInitializer(jdtInitializers, staticInitializerIdent)
+        }
+        else Nil
 
       // Generate class def
       val body: Seq[js.MemberDef] = sjsFields ++
@@ -181,21 +199,25 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
     def genFieldInitializers(fieldDecls: Seq[jdt.FieldDeclaration], thisName: jsn.ClassName)
                             (implicit pos: Position): Seq[js.Assign] = {
       fieldDecls.flatMap { field =>
-        field.fragments.toArray
-          .map(_.asInstanceOf[jdt.VariableDeclarationFragment])
-          .map { frag =>
-            val ident = js.FieldIdent(jsn.FieldName(frag.getName.getIdentifier))
-            val tpe = sjsType(field.getType.resolveBinding)
-            val select = if (jdt.Modifier.isStatic(field.getModifiers)) {
-              js.SelectStatic(thisClassName, ident)(tpe)
-            } else {
-              js.Select(thisNode, thisClassName, ident)(tpe)
-            }
+        field.fragments.asScala[jdt.VariableDeclarationFragment]
+          .flatMap { frag =>
+            frag.getInitializer match {
+              case null =>
+                None
+              case init =>
+                val ident = js.FieldIdent(jsn.FieldName(frag.getName.getIdentifier))
+                val tpe = sjsType(field.getType.resolveBinding)
+                val select = if (jdt.Modifier.isStatic(field.getModifiers)) {
+                  js.SelectStatic(thisClassName, ident)(tpe)
+                } else {
+                  js.Select(thisNode, thisClassName, ident)(tpe)
+                }
 
-            js.Assign(
-              select,
-              cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
-            )
+                Some(js.Assign(
+                  select,
+                  cast(genExprValue(init, Some(tpe)), tpe)
+                ))
+            }
           }
       }
     }
@@ -271,7 +293,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
       js.MethodDef(
         WithConstructorNS,
-        genConstructorIdent(method),
+        MethodInfo(method.resolveBinding).ident,
         NoOriginalName,
         genMethodParams(method),
         jst.NoType,
@@ -353,7 +375,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
       }
     }
 
-    def genStaticInitializer(statics: Seq[jdt.FieldDeclaration],
+    def genStaticInitializer(statics: Seq[jdt.BodyDeclaration],
                              staticInitializerIdent: js.MethodIdent): Seq[js.MemberDef] = {
       implicit val pos: Position = NoPosition
 
@@ -365,6 +387,11 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
 
       val flag = js.FieldDef(memberFlags.withMutable(true),
         flagIdent, NoOriginalName, jst.BooleanType)
+
+      val inits: List[js.Tree] = statics.flatMap {
+        case field: jdt.FieldDeclaration => genFieldInitializers(Seq(field), thisClassName)
+        case init: jdt.Initializer => Seq(genBlock(init.getBody))
+      }.toList
 
       val initializer = js.MethodDef(
         memberFlags,
@@ -381,7 +408,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
             ),
             js.Block(
               js.Assign(flagSelect, js.BooleanLiteral(value = true)),
-              js.Block(genFieldInitializers(statics, thisClassName).toList)
+              js.Block(inits)
             ),
             js.Skip()
           )(jst.NoType)
@@ -448,7 +475,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
       statement match {
         case s: jdt.AssertStatement => ???
 
-        case s: jdt.Block => genBlock(s)
+        case s: jdt.Block =>
+          // TODO: Does a block create a new lexical scope? Do we need to wrap
+          //  this in a labeled statement?
+          genBlock(s)
 
         /*
         TODO: Break and continue
@@ -470,14 +500,13 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         }
 
         case s: jdt.ConstructorInvocation =>
-          val mb = s.resolveConstructorBinding
+          val mi = MethodInfo(s.resolveConstructorBinding)
           js.ApplyStatically(
             WithConstructorFlags,
             thisNode,
             thisClassName,
-            genConstructorIdent(mb),
-            genMethodArgs(mb,
-              s.arguments.asScala[jdt.Expression].map(genExprValue(_)))
+            mi.ident,
+            mi.genArgs(s.arguments.asScala[jdt.Expression].map(genExprValue(_)))
           )(jst.NoType)
 
         case s: jdt.ContinueStatement => Option(s.getLabel) match {
@@ -530,13 +559,18 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           js.If(
             genExprValue(s.getExpression),
             genStatement(s.getThenStatement),
-            genStatement(s.getElseStatement)
+            Option(s.getElseStatement)
+              .map(genStatement)
+              .getOrElse(js.Skip())
           )(jst.NoType)
 
         case s: jdt.LabeledStatement =>
+          // TODO: Detect whether the body is a loop and construct break and
+          //  continue scope automatically
           js.Labeled(
             js.LabelIdent(jsn.LabelName(s.getLabel.getIdentifier)),
             jst.NoType,
+            // TODO: Create a break scope?
             genStatement(s.getBody)
           )
 
@@ -555,14 +589,13 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           )
 
         case s: jdt.SuperConstructorInvocation =>
-          val mb = s.resolveConstructorBinding
+          val mi = MethodInfo(s.resolveConstructorBinding)
           js.ApplyStatically(
             WithConstructorFlags,
             thisNode,
-            jsn.ClassName(mb.getDeclaringClass.getQualifiedName),
-            genConstructorIdent(mb),
-            genMethodArgs(mb,
-              s.arguments.asScala[jdt.Expression].map(genExprValue(_)))
+            mi.declaringClassName,
+            mi.ident,
+            mi.genArgs(s.arguments.asScala[jdt.Expression].map(genExprValue(_)))
           )(jst.NoType)
 
         case s: jdt.SwitchCase =>
@@ -571,7 +604,25 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         case s: jdt.SwitchStatement =>
           genSwitch(s.getExpression, s.statements.asScala[jdt.Statement])
 
-        case s: jdt.SynchronizedStatement => ???
+        case s: jdt.SynchronizedStatement =>
+          val body = genBlock(s.getBody)
+
+          // Process the side-effect of the expression
+          val expr = genExprValue(s.getExpression)
+          val seVarDef = js.VarDef(
+            js.LocalIdent(jsn.LocalName(freshName("sideEffect"))),
+            NoOriginalName, expr.tpe, mutable = false, expr)
+
+          // Check for nullity. This is a runtime thing that we must do to
+          // preserve semantics
+          js.Block(
+            seVarDef,
+            js.If(
+              js.BinaryOp(js.BinaryOp.===, expr, js.Null()),
+              genThrowNPE,
+              body
+            )(jst.NoType)
+          )
 
         case s: jdt.ThrowStatement => js.Throw(genExprValue(s.getExpression))
 
@@ -686,7 +737,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         case e: jdt.ClassInstanceCreation =>
           // TODO: Support anonymous class construction
           val mb = e.resolveConstructorBinding
-          val className = jsn.ClassName(e.getType.resolveBinding.getQualifiedName)
+          val className = jsn.ClassName(e.getType.resolveBinding.getErasure.getQualifiedName)
           val paramTypes = mb.getParameterTypes.map(sjsType)
           val args = e.arguments.asScala[jdt.Expression]
             .map(genExprValue(_))
@@ -729,8 +780,26 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           )(sjsType(e.resolveTypeBinding))
 
         case e: jdt.InfixExpression =>
-          println(e.resolveTypeBinding())
-          ???
+          // TODO: Fold left extended operands
+          if (e.hasExtendedOperands) ???
+
+          val lhs = genExprValue(e.getLeftOperand)
+          val rhs = genExprValue(e.getRightOperand)
+
+          if (isStringy(lhs)) {
+            // String concatenation
+            js.BinaryOp(
+              js.BinaryOp.String_+,
+              lhs,
+              cast(rhs, JDKStringType)
+            )
+          }
+          else {
+            // TODO: Shift ops
+            // Arithmetic or logical op
+            val expectedType = getBinaryOpResultType(lhs.tpe, rhs.tpe)
+            genBinaryOperator(lhs, rhs, expectedType, e.getOperator)
+          }
 
         case e: jdt.InstanceofExpression =>
           js.IsInstanceOf(
@@ -741,38 +810,35 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
         case e: jdt.LambdaExpression => ???
 
         case e: jdt.MethodInvocation =>
-          val mb = e.resolveMethodBinding
-
-          val paramTypes = mb.getParameterTypes.map(sjsType)
-          val ident = js.MethodIdent(jsn.MethodName(
-            e.getName.getIdentifier,
-            paramTypes.map(sjsTypeRef).toList,
-            sjsTypeRef(mb.getReturnType)
-          ))
+          val mi = MethodInfo(e)
           val args = e.arguments().asScala[jdt.Expression]
             .map(genExprValue(_))
-            .zip(paramTypes)
+            .zip(mi.paramTypes)
             .map { case (arg, tpe) => cast(arg, tpe) }
-          val tpe = sjsType(mb.getReturnType)
 
-          if (isStatic(mb)) {
-            // Static call
-            js.ApplyStatic(js.ApplyFlags.empty,
-              jsn.ClassName(mb.getDeclaringClass.getQualifiedName),
-              ident, args)(tpe)
-          }
-          else {
-            // Instance call
-            val receiver = Option(e.getExpression) match {
-              case None =>
-                // Call to an instance method; implied `this`
-                js.This()(jst.ClassType(jsn.ClassName(mb.getDeclaringClass.getQualifiedName)))
-              case Some(expr) =>
-                // Receiver is specified
-                genExprValue(expr)
+          val apply =
+            if (mi.isStatic) {
+              js.ApplyStatic(js.ApplyFlags.empty, mi.declaringClassName, mi.ident,
+                args)(mi.returnType)
             }
-            js.Apply(js.ApplyFlags.empty, receiver, ident, args)(tpe)
-          }
+            else {
+              // Instance call
+              val receiver = Option(e.getExpression) match {
+                case None =>
+                  // Call to an instance method; implied `this`
+                  js.This()(jst.ClassType(mi.declaringClassName))
+                case Some(expr) =>
+                  // Receiver is specified
+                  genExprValue(expr)
+              }
+              js.Apply(js.ApplyFlags.empty, receiver, mi.ident,
+                args)(mi.returnType)
+            }
+
+          // Method return type may be parameterized
+          // Cast the result of the call to the proper type
+          val expectedType = sjsType(e.resolveMethodBinding.getReturnType)
+          if (expectedType != mi.returnType) js.AsInstanceOf(apply, expectedType) else apply
 
         case e: jdt.NullLiteral => js.Null()
 
@@ -850,7 +916,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
           implicit val position: Position = getPosition(e)
 
           val name = e.getFullyQualifiedName
-          val tpe = sjsType(e.resolveTypeBinding())
+          val tpe = sjsType(e.resolveTypeBinding)
           e.resolveBinding() match {
             case v: jdt.IVariableBinding =>
               if (v.isField && isStatic(v)) {
@@ -859,7 +925,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
               }
               else if (v.isField) {
                 js.Select(
-                  js.This()(tpe),
+                  thisNode,
                   jsn.ClassName(v.getDeclaringClass.getQualifiedName),
                   js.FieldIdent(jsn.FieldName(name))
                 )(tpe)
@@ -923,6 +989,123 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
       }
     }
 
+    def genBinaryOperator(lhsIn: js.Tree, rhsIn: js.Tree, outType: jst.Type,
+                          jdtOp: jdt.InfixExpression.Operator)
+                         (implicit pos: Position): js.Tree = {
+      import jdt.InfixExpression.Operator._
+      import org.scalajs.ir.Trees.BinaryOp._
+
+      val lhs = cast(lhsIn, outType)
+      val rhs = cast(rhsIn, if (isShift(jdtOp)) jst.IntType else outType)
+
+      outType match {
+        case jst.IntType =>
+          val op = jdtOp match {
+            case PLUS => Int_+
+            case MINUS => Int_-
+            case TIMES => Int_*
+            case DIVIDE => Int_/
+            case REMAINDER => Int_%
+            case OR => Int_|
+            case AND => Int_&
+            case XOR => Int_^
+            case LEFT_SHIFT => Int_<<
+            case RIGHT_SHIFT_SIGNED => Int_>>
+            case RIGHT_SHIFT_UNSIGNED => Int_>>>
+            case EQUALS => Int_==
+            case NOT_EQUALS => Int_!=
+            case LESS => Int_<
+            case LESS_EQUALS => Int_<=
+            case GREATER => Int_>
+            case GREATER_EQUALS => Int_>=
+          }
+          js.BinaryOp(op, lhs, rhs)
+
+        case jst.LongType =>
+          val op = jdtOp match {
+            case PLUS => Long_+
+            case MINUS => Long_-
+            case TIMES => Long_*
+            case DIVIDE => Long_/
+            case REMAINDER => Long_%
+            case OR => Long_|
+            case AND => Long_&
+            case XOR => Long_^
+            case LEFT_SHIFT => Long_<<
+            case RIGHT_SHIFT_SIGNED => Long_>>
+            case RIGHT_SHIFT_UNSIGNED => Long_>>>
+            case EQUALS => Long_==
+            case NOT_EQUALS => Long_!=
+            case LESS => Long_<
+            case LESS_EQUALS => Long_<=
+            case GREATER => Long_>
+            case GREATER_EQUALS => Long_>=
+          }
+          js.BinaryOp(op, lhs, rhs)
+
+        case jst.FloatType =>
+          def withFloats(op: Int): js.Tree =
+            js.BinaryOp(op, lhs, rhs)
+
+          def toDouble(value: js.Tree): js.Tree =
+            js.UnaryOp(js.UnaryOp.FloatToDouble, value)
+
+          def withDoubles(op: Int): js.Tree =
+            js.BinaryOp(op, toDouble(lhs), toDouble(rhs))
+
+          jdtOp match {
+            case PLUS => withFloats(Float_+)
+            case MINUS => withFloats(Float_-)
+            case TIMES => withFloats(Float_*)
+            case DIVIDE => withFloats(Float_/)
+            case REMAINDER => withFloats(Float_%)
+
+            case EQUALS => withDoubles(Double_==)
+            case NOT_EQUALS => withDoubles(Double_!=)
+            case LESS => withDoubles(Double_<)
+            case LESS_EQUALS => withDoubles(Double_<=)
+            case GREATER => withDoubles(Double_>)
+            case GREATER_EQUALS => withDoubles(Double_>=)
+          }
+
+        case jst.DoubleType =>
+          val op = jdtOp match {
+            case PLUS => Double_+
+            case MINUS => Double_-
+            case TIMES => Double_*
+            case DIVIDE => Double_/
+            case REMAINDER => Double_%
+            case EQUALS => Double_==
+            case NOT_EQUALS => Double_!=
+            case LESS => Double_<
+            case LESS_EQUALS => Double_<=
+            case GREATER => Double_>
+            case GREATER_EQUALS => Double_>=
+          }
+          js.BinaryOp(op, lhs, rhs)
+
+        case jst.BooleanType =>
+          jdtOp match {
+            case AND => js.BinaryOp(Boolean_&, lhs, rhs)
+            case OR => js.BinaryOp(Boolean_|, lhs, rhs)
+            case EQUALS => js.BinaryOp(Boolean_==, lhs, rhs)
+            case NOT_EQUALS | XOR => js.BinaryOp(Boolean_!=, lhs, rhs)
+            case CONDITIONAL_AND =>
+              js.If(lhs, rhs, js.BooleanLiteral(value = false))(jst.BooleanType)
+            case CONDITIONAL_OR =>
+              js.If(lhs, js.BooleanLiteral(value = true), rhs)(jst.BooleanType)
+          }
+
+        case _ =>
+          jdtOp match {
+            case EQUALS => js.BinaryOp(===, lhs, rhs)
+            case NOT_EQUALS => js.BinaryOp(!==, lhs, rhs)
+          }
+      }
+    }
+
+    // region Static helpers
+
     /**
      * Generates a static method call to get the value of a static field.
      */
@@ -950,6 +1133,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
       )),
       List(value)
     )(jst.NoType)
+
+    // endregion
+
+    // region Switch statement processing
 
     /**
      * Generates a switch statement.
@@ -1078,18 +1265,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit) {
       compilationUnit.getColumnNumber(node.getStartPosition)
     )
 
-    def qualifyName(name: String): String = {
-      Seq(packageName, Some(name)).flatten.mkString(".")
-    }
-
-    def packageName: Option[String] = {
-      if (compilationUnit.getPackage == null) return None
-      Some(compilationUnit.getPackage.getName.getFullyQualifiedName)
-    }
+    def nameString(f: js.FieldDef): String = f.name.name.nameString
 
     // endregion
-
-    def nameString(f: js.FieldDef): String = f.name.name.nameString
 
     // TODO: Handle imports
     compilationUnit.types.asScala[jdt.AbstractTypeDeclaration]

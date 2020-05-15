@@ -9,8 +9,19 @@ object TypeUtils {
     "java.lang.Character", "java.lang.Byte", "java.lang.Short",
     "java.lang.Integer", "java.lang.Long", "java.lang.Float",
     "java.lang.Double", "java.lang.String")
+  val JDKObjectType: jst.ClassType = jst.ClassType(jsn.ClassName("java.lang.Object"))
   val JDKStringType: jst.ClassType = jst.ClassType(jsn.ClassName("java.util.String"))
   val JDKStringRef: jst.TypeRef = sjsTypeRef(JDKStringType)
+
+  def isStringy(tree: js.Tree): Boolean = tree.tpe == JDKStringType || tree.tpe == jst.StringType
+
+  def isShift(op: jdt.InfixExpression.Operator): Boolean = {
+    import jdt.InfixExpression.Operator._
+    op match {
+      case LEFT_SHIFT | RIGHT_SHIFT_SIGNED | RIGHT_SHIFT_UNSIGNED => true
+      case _ => false
+    }
+  }
 
   private val BoxedByteType = jst.ClassType(jsn.ClassName("java.lang.Byte"))
   private val BoxedCharType = jst.ClassType(jsn.ClassName("java.lang.Character"))
@@ -67,7 +78,8 @@ object TypeUtils {
     else js.MemberNamespace.Public
   }
 
-  def sjsType(t: jdt.ITypeBinding): jst.Type = {
+  def sjsType(_t: jdt.ITypeBinding): jst.Type = {
+    val t = _t.getErasure
     if (t.isPrimitive) {
       t.getName match {
         case "boolean" => jst.BooleanType
@@ -98,7 +110,8 @@ object TypeUtils {
     )
   }
 
-  def sjsTypeRef(t: jdt.ITypeBinding): jst.TypeRef = {
+  def sjsTypeRef(_t: jdt.ITypeBinding): jst.TypeRef = {
+    val t = _t.getErasure
     if (t.isPrimitive) sjsType(t).asInstanceOf[jst.PrimTypeWithRef].primRef
     else if (t.isArray) sjsArrayTypeRef(t)
     else if (t.isClass) jst.ClassRef(jsn.ClassName(t.getQualifiedName))
@@ -312,6 +325,28 @@ object TypeUtils {
         case jst.DoubleType =>
           doubleValue
       }
+    }
+  }
+  
+  def getBinaryOpResultType(left: jst.Type, right: jst.Type, 
+                            isShift: Boolean = false): jst.Type = {
+    (left, right) match {
+      case (jst.LongType, _) if isShift => jst.LongType
+      case _ if isShift => jst.IntType
+
+      case (jst.DoubleType, _) | (_, jst.DoubleType) =>
+        jst.DoubleType
+      case (jst.FloatType, _) | (_, jst.FloatType) =>
+        jst.FloatType
+      case (jst.LongType, _) | (_, jst.LongType) =>
+        jst.LongType
+      case (jst.IntType | jst.CharType | jst.ByteType | jst.ShortType, _) |
+           (_, jst.IntType | jst.CharType | jst.ByteType | jst.ShortType) =>
+        jst.IntType
+      case (jst.BooleanType, _) | (_, jst.BooleanType) =>
+        jst.BooleanType
+      case _ =>
+        jst.AnyType
     }
   }
 

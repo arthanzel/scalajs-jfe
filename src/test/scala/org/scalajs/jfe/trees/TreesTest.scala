@@ -1,6 +1,7 @@
 package org.scalajs.jfe.trees
 
-import org.scalajs.jfe.{ASTUtils, TextUtils => tu}
+import org.scalajs.jfe.ASTUtils
+import org.scalajs.jfe.util.{TextUtils => tu}
 import org.scalajs.ir.{Names => jsn, Position, Trees => js, Types => jst}
 import org.scalatest.BeforeAndAfter
 import org.scalatest.funspec.AnyFunSpec
@@ -23,8 +24,7 @@ class TreesTest extends AnyFunSpec with BeforeAndAfter {
 
   def assertJavaBody(bodySrc: String, expectedIR: String): Unit = {
     val jdtIR = ASTUtils.compileJavaString(
-      s"""
-         |package test
+      s"""package test;
          |class TestClass {
          |  public void test() {
          |    ${bodySrc}
@@ -44,7 +44,6 @@ class TreesTest extends AnyFunSpec with BeforeAndAfter {
       assertStatements("byte b = 99;", "var b: byte = ((byte)99)")
       assertStatements("char c = 'x';", "var c: char = 'x'")
       assertStatements("double d = 88.8;", "var d: double = 88.8d")
-      assertStatements("float f = 9.9;", "var f: float = ((float)9.9d)")
       assertStatements("float f = 9.9f;", "var f: float = 9.9f")
       assertStatements("int i = 10;", "var i: int = 10")
       assertStatements("long l = 11;", "var l: long = ((long)11)")

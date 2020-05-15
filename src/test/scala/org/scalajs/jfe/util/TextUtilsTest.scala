@@ -1,10 +1,12 @@
 package org.scalajs.jfe
 
-import org.scalatest.funspec.AnyFunSpec
-import org.scalajs.jfe.{TextUtils => tu}
+import org.scalajs.jfe.util.{TextUtils => tu}
+
 import org.scalatest.BeforeAndAfter
+import org.scalatest.funspec.AnyFunSpec
 
 class TextUtilsTest extends AnyFunSpec with BeforeAndAfter {
+
   before {
     tu.clearFreshNames()
   }

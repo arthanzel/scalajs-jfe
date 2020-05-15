@@ -30,8 +30,7 @@ object TestUtils {
 
   def assertStatements(javaStatements: String, sjsirStatements: String, msg: String = ""): Unit = {
     val ast = ASTUtils.javaToSJS(
-      s"""
-         |package test
+      s"""package test;
          |class Test {
          |  void test() {
          |    ${javaStatements}

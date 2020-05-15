@@ -1,4 +1,4 @@
-package org.scalajs.jfe
+package org.scalajs.jfe.util
 
 import scala.collection.mutable
 

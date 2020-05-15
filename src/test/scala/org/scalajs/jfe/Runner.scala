@@ -6,6 +6,7 @@ import com.google.common.jimfs.Jimfs
 import org.scalajs.ir
 import org.scalajs.ir.Trees.ClassDef
 import org.scalajs.ir.{Trees => js}
+import org.scalajs.jfe.util.TextUtils
 import org.scalajs.jsenv.{Input, RunConfig, nodejs}
 import org.scalajs.linker.interface.unstable.IRFileImpl
 import org.scalajs.linker.interface.{LinkerOutput, ModuleInitializer, StandardConfig}

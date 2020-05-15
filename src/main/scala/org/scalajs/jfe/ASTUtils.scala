@@ -3,15 +3,16 @@ package org.scalajs.jfe
 import java.io.{File, StringWriter}
 import java.nio.file.Paths
 
-import org.eclipse.jdt.core.{dom => jdt}
+import org.eclipse.jdt.core.{JavaCore, dom => jdt}
 import org.scalajs.ir.Printers.IRTreePrinter
 import org.scalajs.ir.Trees
 import org.scalajs.jfe.trees.JDTCompiler
+import org.scalajs.jfe.util.TextUtils
 import org.scalajs.nscplugin.ScalaJSPlugin
 
 import scala.io.BufferedSource
+import scala.jdk.CollectionConverters._
 import scala.reflect.internal.util.BatchSourceFile
-import scala.reflect.io.Path
 import scala.tools.nsc
 import scala.tools.nsc.reporters.ConsoleReporter
 
@@ -58,7 +59,22 @@ object ASTUtils {
     )
     parser.setUnitName("unit")
     parser.setSource(code.toCharArray)
-    parser.createAST(null).asInstanceOf[jdt.CompilationUnit]
+    parser.setCompilerOptions(Map(
+      JavaCore.COMPILER_SOURCE -> "11",
+    ).asJava)
+    val cu = parser.createAST(null).asInstanceOf[jdt.CompilationUnit]
+
+    cu.getProblems.foreach { p =>
+      if (p.isError)
+        throw new JavaCompilationException(s"${p.getSourceLineNumber}: (${p.getID}) ${p.getMessage}")
+      else if (p.isWarning)
+        println(s"Warning: ${p.getSourceLineNumber}: ${p.getMessage}")
+      else {
+        // Info
+        println(s"Info: ${p.getSourceLineNumber}: ${p.getMessage}")
+      }
+    }
+    cu
   }
 
   def compileJavaString(code: BufferedSource): jdt.CompilationUnit =

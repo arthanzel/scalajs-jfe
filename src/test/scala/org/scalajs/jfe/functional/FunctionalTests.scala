@@ -1,12 +1,11 @@
 package org.scalajs.jfe.functional
 
-import org.scalajs.jfe.{ASTUtils, Runner, TextUtils}
-import org.scalajs.logging.ScalaConsoleLogger
+import org.scalajs.jfe.ASTUtils
+import org.scalajs.jfe.util.TextUtils
 import org.scalatest.BeforeAndAfter
 import org.scalatest.funspec.AnyFunSpec
 
 class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
-
   import org.scalajs.jfe.TestUtils._
 
   before {
@@ -45,7 +44,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |        Byte b = 10;
           |        Short s = 11;
           |        Integer i = 12;
-          |        Long l = 13;
+          |        Long l = 13L;
           |        System.out.println(bool);
           |        System.out.println(b);
           |        System.out.println(s);
@@ -60,7 +59,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
 
   describe("Language features:") {
     describe("Flow control:") {
-      it("handles if-else statements") {
+      it("handles if-else statements with literals") {
         val src =
           """class Main {
             |    public static void main() {
@@ -71,6 +70,26 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
             |    }
             |}""".stripMargin
         assertRun(src, Seq("true 1", "false 2"))
+      }
+
+      it("handles if-else statements with conditions") {
+        val src =
+          """class Main {
+            |    static String keiko = "cat";
+            |    static String bella = "dog";
+            |    public static void main() {
+            |        if (keiko == "cat")
+            |            System.out.println("Keiko is a cat");
+            |        if (keiko == "dog")
+            |            System.out.println("Keiko is a dog");
+            |        if (keiko == "cat" || bella == "cat")
+            |            System.out.println("I have at least one cat");
+            |        if (keiko == "cat" && bella == "dog")
+            |            System.out.println("I have a cat and a dog");
+            |    }
+            |}""".stripMargin
+        assertRun(src, Seq("Keiko is a cat", "I have at least one cat",
+          "I have a cat and a dog"))
       }
 
       it("handles if-elseif-else statements") {
@@ -104,6 +123,16 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |}""".stripMargin
       assertRun(src, Seq(10, 11, 12.5, 13.5, true, '@'))
     }
+
+    it("does math") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        System.out.println(10 + 20);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(30));
+    }
   }
 
   describe("Instances:") {
@@ -118,11 +147,11 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |        System.out.println(r.nextInt(10));
           |        Object o = new Object();
           |        System.out.println(o.toString());
-          |        //Integer i = new Integer(10);
-          |        //System.out.println(new Integer(i.hashCode()));
+          |        Integer i = new Integer(10);
+          |        System.out.println(new Integer(i.compareTo(30)));
           |    }
           |}""".stripMargin
-      assertRun(src, Seq("A string", 8, "java.lang.Object@1"))
+      assertRun(src, Seq("A string", 8, "java.lang.Object@1", -1))
     }
 
     it("constructs objects") {
@@ -348,15 +377,6 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    }
           |}
           |""".stripMargin
-      val scala =
-        """
-          |object O {
-          |  new C().method()
-          |}
-          |class C {
-          |  def method() = super.hashCode()
-          |}
-          |""".stripMargin
       assertRun(src, Seq("fieldB", "methodB", "fieldA", "methodA"))
     }
   }
@@ -407,7 +427,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    static short s = 101;
           |    static int i = 102;
           |    static long l = 103;
-          |    static float f = 104.5;
+          |    static float f = 104.5f;
           |    static double d = 105.5;
           |    static boolean bool = true;
           |    static char c = '@';
@@ -480,7 +500,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
     it("have side-effects") {
       val src =
         """class Main {
-          |    static String stat = "A string"
+          |    static String stat = "A string";
           |    static void modify() {
           |        stat = "A modified string";
           |    }
@@ -495,4 +515,42 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
   }
 
   describe("Classes") {}
+
+  describe("Generics") {
+    it("sandbox") {
+      val scala =
+        """import java.util.LinkedList;
+          |object Main {
+          |  val l = new LinkedList[String]();
+          |  l.add("foo");
+          |  System.out.println(l.get(0));
+          |}""".stripMargin
+      ASTUtils.compileString(scala).map(_.show).foreach(println)
+
+      println("\n\n====== Java ======\n\n")
+
+      val src =
+        """import java.util.LinkedList;
+          |class Main {
+          |    static {
+          |         System.out.println("static");
+          |    }
+          |
+          |    public static void main() {
+          |        LinkedList<Integer> ints = new LinkedList<>();
+          |        LinkedList<String> strings = new LinkedList<>();
+          |        ints.add(10);
+          |        ints.add(20);
+          |        strings.add("one");
+          |        strings.add("two");
+          |        System.out.println(ints.get(0));
+          |        System.out.println(ints.get(1));
+          |        System.out.println(strings.get(0));
+          |        System.out.println(strings.get(1));
+          |    }
+          |}""".stripMargin
+      ASTUtils.javaToSJS(src).map(_.show).foreach(println)
+      assertRun(src, Seq(10, 20, "one", "two"))
+    }
+  }
 }
