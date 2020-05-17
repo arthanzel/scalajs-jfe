@@ -21,7 +21,8 @@ case class MethodInfo(binding: jdt.IMethodBinding) {
     .map(t => t.getErasure)
     .map(sjsType)
     .toList
-  val returnType: jst.Type = sjsType(decl.getReturnType)
+  val returnType: jst.Type = sjsType(decl.getReturnType.getErasure)
+  val invocationReturnType: jst.Type = sjsType(binding.getReturnType)
 
   def genArgs(args: Seq[js.Tree])
              (implicit pos: Position): List[js.Tree] =

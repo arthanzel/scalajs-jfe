@@ -606,7 +606,6 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |        new Main();
           |    }
           |}""".stripMargin
-      ASTUtils.javaToSJS(src).map(_.show).foreach(println)
       assertRun(src, Seq("constant", "instance", "method"))
     }
   }
@@ -634,6 +633,90 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    }
           |}""".stripMargin
       assertRun(src, Seq(10, 20, "one", "two"))
+    }
+
+    it("defines and uses a generic class") {
+      val src =
+        """class Container<T> {
+          |    T value;
+          |    public Container(T value) { set(value); }
+          |    public T get() { return value; }
+          |    public void set(T value) { this.value = value; }
+          |}
+          |
+          |class Main {
+          |    public static void main() {
+          |        Container<String> s = new Container<String>("foo");
+          |        System.out.println(s.get());
+          |        s.set("bar");
+          |        System.out.println(s.get());
+          |        System.out.println(s.value);
+          |
+          |        Container<Integer> i = new Container<Integer>(10);
+          |        System.out.println(i.get());
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq("foo", "bar", "bar", 10))
+    }
+
+    it("defines and uses a generic class with custom data") {
+      val src =
+        """class Container<T> {
+          |    T value;
+          |    public Container(T value) { set(value); }
+          |    public T get() { return value; }
+          |    public void set(T value) { this.value = value; }
+          |}
+          |
+          |class Data {}
+          |
+          |class Main {
+          |    public static void main() {
+          |        Data data1 = new Data();
+          |        Data data2 = new Data();
+          |        Container<Data> c = new Container<Data>(data1);
+          |        System.out.println(c.get());
+          |        c.set(data2);
+          |        System.out.println(c.get());
+          |        System.out.println(c.value);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq("test.Data@1", "test.Data@2", "test.Data@2"))
+    }
+
+    it("supports static parameterized methods") {
+      val src =
+          """class Main {
+          |    static <T> T[] setHead(T[] arr, T item) { arr[0] = item; return arr; }
+          |    public static void main() {
+          |        Object[] arr = new Object[] { new Object(), new Object() };
+          |        System.out.println(arr[0].hashCode());
+          |        System.out.println(arr[1].hashCode());
+          |        arr = setHead(arr, new Object());
+          |        System.out.println(arr[0].hashCode());
+          |        System.out.println(arr[1].hashCode());
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(1, 2, 3, 2))
+    }
+
+    it("supports instance parameterized methods") {
+      val src =
+        """class Main {
+          |    <T> T[] setHead(T[] arr, T item) { arr[0] = item; return arr; }
+          |    public void test() {
+          |        Object[] arr = new Object[] { new Object(), new Object() };
+          |        System.out.println(arr[0].hashCode());
+          |        System.out.println(arr[1].hashCode());
+          |        arr = setHead(arr, new Object());
+          |        System.out.println(arr[0].hashCode());
+          |        System.out.println(arr[1].hashCode());
+          |    }
+          |    public static void main() {
+          |        new Main().test();
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(1, 2, 3, 2))
     }
   }
 }

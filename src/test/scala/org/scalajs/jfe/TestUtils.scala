@@ -60,7 +60,7 @@ object TestUtils {
   def assertRun(_javaCode: String, expectedOut: String): Unit = {
     // Convenience: put everything under the "test" package
     val javaCode =
-      if (!_javaCode.startsWith("package test;\n"))
+      if (!_javaCode.trim.startsWith("package"))
         "package test;\n" + _javaCode
       else _javaCode
 

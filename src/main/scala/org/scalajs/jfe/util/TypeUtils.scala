@@ -136,6 +136,16 @@ object TypeUtils {
       throw new JavaCompilationException(s"Can't compute a typeref for $tpe")
   }
 
+  def staticCast(tree: js.Tree, to: jdt.ITypeBinding)
+                (implicit pos: Position): js.Tree =
+    staticCast(tree, sjsType(to))
+
+  def staticCast(tree: js.Tree, to: jst.Type)
+                (implicit pos: Position): js.Tree =
+    if (tree.tpe == to) tree
+    else
+      js.AsInstanceOf(tree, to)
+
   def cast(tree: js.Tree, to: jst.Type, isAssignment: Boolean = false)
           (implicit pos: Position): js.Tree = {
     // TODO: Optimize, type-check, and bounds-check casts
@@ -151,18 +161,18 @@ object TypeUtils {
     if (from.isInstanceOf[jst.PrimType] && to.isInstanceOf[jst.PrimType]) return adaptPrimitive(tree, to)
 
     // Stringify
-//    if (to == jst.StringType || to == JDKStringType) return from match {
-//      case _: jst.ClassType =>
-//        js.Apply(
-//          js.ApplyFlags.empty,
-//          tree,
-//          js.MethodIdent(jsn.MethodName("toString", Nil, JDKStringRef)),
-//          Nil
-//        )(JDKStringType)
-//      case _: jst.PrimType =>
-//        // TODO: Stringify primitives
-//        tree
-//    }
+    //    if (to == jst.StringType || to == JDKStringType) return from match {
+    //      case _: jst.ClassType =>
+    //        js.Apply(
+    //          js.ApplyFlags.empty,
+    //          tree,
+    //          js.MethodIdent(jsn.MethodName("toString", Nil, JDKStringRef)),
+    //          Nil
+    //        )(JDKStringType)
+    //      case _: jst.PrimType =>
+    //        // TODO: Stringify primitives
+    //        tree
+    //    }
 
     /*
     Boxing:
@@ -334,8 +344,8 @@ object TypeUtils {
       }
     }
   }
-  
-  def getBinaryOpResultType(left: jst.Type, right: jst.Type, 
+
+  def getBinaryOpResultType(left: jst.Type, right: jst.Type,
                             isShift: Boolean = false): jst.Type = {
     (left, right) match {
       case (jst.LongType, _) if isShift => jst.LongType

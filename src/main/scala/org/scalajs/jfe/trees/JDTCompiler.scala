@@ -42,18 +42,6 @@ object JDTCompiler {
     jsn.MethodName(TextUtils.freshName("$sjsirStaticInitializer"), Nil,
       jst.VoidRef)
   )(NoPosition)
-
-  /**
-   * Convenience method to throw an NPE. Used in routines that have runtime
-   * semantics, like null-checking the `synchronized` expression.
-   */
-  def genThrowNPE(implicit pos: Position): js.Throw = {
-    js.Throw(js.New(
-      jsn.ClassName("java.lang.NullPointerException"),
-      js.MethodIdent(jsn.MethodName.constructor(Nil)),
-      Nil
-    ))
-  }
 }
 
 /**
@@ -89,17 +77,20 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
   val breakScope = new ScopedStack[String]
   val continueScope = new ScopedStack[String]
 
-  def withReturnScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+  def withReturnScope(tpe: jst.Type)(body: => js.Tree)
+                     (implicit pos: Position): js.Labeled =
     returnScope.withValue(freshName("_return")) { label =>
       js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
     }
 
-  def withBreakScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+  def withBreakScope(tpe: jst.Type)(body: => js.Tree)
+                    (implicit pos: Position): js.Labeled =
     breakScope.withValue(freshName("_break")) { label =>
       js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
     }
 
-  def withContinueScope(tpe: jst.Type)(body: => js.Tree)(implicit pos: Position) =
+  def withContinueScope(tpe: jst.Type)(body: => js.Tree)
+                       (implicit pos: Position): js.Labeled =
     continueScope.withValue(freshName("_continue")) { label =>
       js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
     }
@@ -111,9 +102,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
    */
   def gen(): Seq[js.ClassDef] = {
     topLevel match {
-      case anno: jdt.AnnotationTypeDeclaration =>
+      case _: jdt.AnnotationTypeDeclaration =>
         throw new NotImplementedError("Compiling annotations is not supported yet")
-      case enum: jdt.EnumDeclaration =>
+      case _: jdt.EnumDeclaration =>
         throw new NotImplementedError("Compiling enums is not supported yet")
       case intf: jdt.TypeDeclaration if intf.isInterface =>
         throw new NotImplementedError("Compiling interfaces is not supported yet")
@@ -684,7 +675,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
   }
 
   def genExprStatement(expression: jdt.Expression): js.Tree =
-    genExpr(expression, false, None)
+    genExpr(expression, returningValue = false, None)
 
   /**
    * Transforms a JDT Expression into SJS IR.
@@ -694,24 +685,22 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
    * @return
    */
   def genExprValue(expression: jdt.Expression, tpe: Option[jst.Type] = None): js.Tree =
-    genExpr(expression, true, tpe)
+    genExpr(expression, returningValue = true, tpe)
 
   def genExpr(expression: jdt.Expression, returningValue: Boolean, tpe: Option[jst.Type] = None): js.Tree = {
     implicit val position: Position = getPosition(expression)
-
-    def recurse(expr: jdt.Expression) =
-      genExpr(expr, false, tpe)
 
     // TODO: Constant expressions may be optimized out into literals
     // See https://docs.oracle.com/javase/specs/jls/se12/html/jls-15.html#jls-15.28
 
     expression match {
-      case e: jdt.Annotation => ???
+      case e: jdt.Annotation => js.Skip()
 
-      case e: jdt.ArrayAccess => js.ArraySelect(
+      case e: jdt.ArrayAccess =>
+        js.ArraySelect(
         genExprValue(e.getArray),
         genExprValue(e.getIndex)
-      )(sjsType(e.resolveTypeBinding.getElementType))
+      )(sjsType(e.resolveTypeBinding))
 
       case e: jdt.ArrayCreation =>
         if (!e.dimensions.isEmpty) {
@@ -768,18 +757,18 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case e: jdt.ClassInstanceCreation =>
         // TODO: Support anonymous class construction
         val mb = e.resolveConstructorBinding
+        val mi = MethodInfo(mb)
         val className = jsn.ClassName(e.getType.resolveBinding.getErasure.getBinaryName)
         val paramTypes = mb.getParameterTypes.map(sjsType)
-        val args = e.arguments.asScala[jdt.Expression]
-          .map(genExprValue(_))
-          .zip(paramTypes)
-          .map { case (arg, targetType) => cast(arg, targetType) }
+        val args = mi.genArgs(e.arguments.asScala[jdt.Expression].map(genExprValue(_)))
         val isHijacked = HijackedClasses.contains(className.nameString)
-        val methodIdent = js.MethodIdent(jsn.MethodName(
-          if (isHijacked) "new" else "<init>",
-          mb.getParameterTypes.map(sjsTypeRef).toList,
-          if (isHijacked) sjsTypeRef(mb.getDeclaringClass) else jst.VoidRef
-        ))
+        val methodIdent =
+          if (isHijacked)
+            js.MethodIdent(jsn.MethodName(
+              "new", mi.paramTypes.map(sjsTypeRef), sjsTypeRef(mb.getDeclaringClass)
+            ))
+          else
+            js.MethodIdent(jsn.MethodName.constructor(mi.paramTypes.map(sjsTypeRef)))
         val tpe = jst.ClassType(className)
 
         if (isHijacked) {
@@ -799,16 +788,16 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         genExprValue(e.getElseExpression)
       )(sjsType(e.resolveTypeBinding()))
 
-      case e: jdt.CreationReference => ???
+      case e: jdt.CreationReference =>
+        // TODO: Implement creation references with lambdas
+        throw new JavaCompilationException("Creation references aren't supported yet")
 
-      case e: jdt.ExpressionMethodReference => ???
+      case e: jdt.ExpressionMethodReference =>
+        // TODO: Implement method references with lambdas
+        throw new JavaCompilationException("Method references aren't supported yet")
 
       case e: jdt.FieldAccess =>
-        js.Select(
-          genExprValue(e.getExpression),
-          jsn.ClassName(e.getExpression.resolveTypeBinding.getBinaryName),
-          js.FieldIdent(jsn.FieldName(e.getName.getIdentifier))
-        )(sjsType(e.resolveTypeBinding))
+        genSelect(genExprValue(e.getExpression), e.resolveFieldBinding)
 
       case e: jdt.InfixExpression =>
         // TODO: Fold left extended operands
@@ -838,16 +827,15 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           sjsType(e.getRightOperand.resolveBinding())
         )
 
-      case e: jdt.LambdaExpression => ???
+      case e: jdt.LambdaExpression =>
+        // TODO: implement lambdas
+        throw new JavaCompilationException("Lambdas aren't supported yet")
 
       case e: jdt.MethodInvocation =>
         val mi = MethodInfo(e.resolveMethodBinding)
-        val args = e.arguments().asScala[jdt.Expression]
-          .map(genExprValue(_))
-          .zip(mi.paramTypes)
-          .map { case (arg, tpe) => cast(arg, tpe) }
+        val args = mi.genArgs(e.arguments.asScala[jdt.Expression].map(genExprValue(_)))
 
-        val apply =
+        val tree =
           if (mi.isStatic) {
             js.ApplyStatic(js.ApplyFlags.empty, mi.declaringClassName, mi.ident,
               args)(mi.returnType)
@@ -856,8 +844,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             // Instance call
             val receiver = Option(e.getExpression) match {
               case None =>
-                // Call to an instance method; implied `this`
-                js.This()(jst.ClassType(mi.declaringClassName))
+                // Receiver `this` is implied
+                thisNode
               case Some(expr) =>
                 // Receiver is specified
                 genExprValue(expr)
@@ -866,10 +854,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
               args)(mi.returnType)
           }
 
-        // Method return type may be parameterized
+        // Method return type may be erased
         // Cast the result of the call to the proper type
-        val expectedType = sjsType(e.resolveMethodBinding.getReturnType)
-        if (expectedType != mi.returnType) js.AsInstanceOf(apply, expectedType) else apply
+        staticCast(tree, mi.invocationReturnType)
 
       case e: jdt.NullLiteral => js.Null()
 
@@ -931,42 +918,35 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           genStaticGet(
             vb.getName,
             jsn.ClassName(vb.getDeclaringClass.getBinaryName),
-            sjsType(vb.getType)
+            sjsType(vb.getVariableDeclaration.getType)
           )
         }
         else {
           // Instance members are plain selects
-          js.Select(
-            genExprValue(e.getQualifier),
-            jsn.ClassName(vb.getDeclaringClass.getBinaryName),
-            js.FieldIdent(jsn.FieldName(e.getName.getIdentifier))
-          )(sjsType(vb.getType))
+          genSelect(genExprValue(e.getQualifier), vb)
         }
 
       case e: jdt.SimpleName =>
         implicit val position: Position = getPosition(e)
 
-        val name = e.getFullyQualifiedName
         val tpe = sjsType(e.resolveTypeBinding)
         e.resolveBinding() match {
-          case v: jdt.IVariableBinding =>
-            if (v.isField && isStatic(v)) {
-              // TODO: Is name ever on lhs of assignment?
-              genStaticGet(v.getName, thisClassName, sjsType(v.getType))
+          case vb: jdt.IVariableBinding =>
+            if (vb.isField && isStatic(vb)) {
+              genStaticGet(vb.getName, thisClassName, tpe)
             }
-            else if (v.isField) {
-              js.Select(
-                thisNode,
-                jsn.ClassName(v.getDeclaringClass.getBinaryName),
-                js.FieldIdent(jsn.FieldName(name))
-              )(tpe)
+            else if (vb.isField) {
+              genSelect(thisNode, vb)
             }
-            else js.VarRef(
-              js.LocalIdent(jsn.LocalName(name))
-            )(sjsType(v.getType))
-          case p: jdt.IMethodBinding => ???
-          case t: jdt.ITypeBinding =>
-            ???
+            else {
+              // Local variable or method parameter
+              val tree = js.VarRef(
+                js.LocalIdent(jsn.LocalName(vb.getName))
+              )(sjsType(vb.getVariableDeclaration.getType))
+              staticCast(tree, tpe)
+            }
+          case mb: jdt.IMethodBinding => ???
+          case tb: jdt.ITypeBinding => ???
         }
 
       case e: jdt.StringLiteral => js.StringLiteral(e.getLiteralValue)
@@ -1288,9 +1268,31 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
   // endregion
 
+  def genSelect(qualifier: js.Tree, vb: jdt.IVariableBinding)
+               (implicit pos: Position): js.Tree = {
+    val tree = js.Select(
+      qualifier,
+      jsn.ClassName(vb.getDeclaringClass.getBinaryName),
+      js.FieldIdent(jsn.FieldName(vb.getName))
+    )(sjsType(vb.getVariableDeclaration.getType))
+    staticCast(tree, sjsType(vb.getType))
+  }
+
+  /**
+   * Convenience method to throw an NPE. Used in routines that have runtime
+   * semantics, like null-checking the `synchronized` expression.
+   */
+  def genThrowNPE(implicit pos: Position): js.Throw = {
+    js.Throw(js.New(
+      jsn.ClassName("java.lang.NullPointerException"),
+      js.MethodIdent(jsn.MethodName.constructor(Nil)),
+      Nil
+    ))
+  }
+
   // region Helper methods
 
-  def getPosition(node: jdt.ASTNode) = Position(
+  def getPosition(node: jdt.ASTNode): Position = Position(
     Position.SourceFile("TODO"),
     compilationUnit.getLineNumber(node.getStartPosition),
     compilationUnit.getColumnNumber(node.getStartPosition)
