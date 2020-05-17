@@ -212,12 +212,21 @@ object TypeUtils {
 
   // endregion
 
-  def tryUnbox(tree: js.Tree, to: jst.Type)
+  def tryUnbox(tree: js.Tree)
               (implicit pos: Position): Option[js.Tree] =
     unboxingMap.get(tree.tpe) match {
       case Some(to) => Some(js.AsInstanceOf(tree, to))
       case _ => None
     }
+
+  def unboxed(tree: js.Tree)
+             (implicit pos: Position): js.Tree =
+    if (unboxingMap.contains(tree.tpe))
+      js.AsInstanceOf(tree, unboxingMap(tree.tpe))
+    else if (boxingMap.contains(tree.tpe))
+      tree
+    else
+      throw new JavaCompilationException(s"Cannot box expression ${tree} of type ${tree.tpe}")
 
   private def literalLongValue(lit: js.Literal): Long = lit match {
     case x: js.ByteLiteral => x.value

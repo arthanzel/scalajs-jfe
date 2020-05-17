@@ -698,9 +698,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
       case e: jdt.ArrayAccess =>
         js.ArraySelect(
-        genExprValue(e.getArray),
-        genExprValue(e.getIndex)
-      )(sjsType(e.resolveTypeBinding))
+          genExprValue(e.getArray),
+          genExprValue(e.getIndex)
+        )(sjsType(e.resolveTypeBinding))
 
       case e: jdt.ArrayCreation =>
         if (!e.dimensions.isEmpty) {
@@ -817,8 +817,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         else {
           // TODO: Shift ops
           // Arithmetic or logical op
-          val expectedType = getBinaryOpResultType(lhs.tpe, rhs.tpe)
-          genBinaryOperator(lhs, rhs, expectedType, e.getOperator)
+          genBinaryOperator(lhs, rhs, e.getOperator)
         }
 
       case e: jdt.InstanceofExpression =>
@@ -875,41 +874,104 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case e: jdt.ParenthesizedExpression => genExprValue(e.getExpression)
 
       case e: jdt.PostfixExpression =>
-        val tempVar = js.LocalIdent(jsn.LocalName(TextUtils.freshName("temp")))
-        val tpe = sjsType(e.getOperand.resolveTypeBinding())
-        val lhs = genExprValue(e.getOperand)
+        import jdt.PostfixExpression.Operator._
+        val expr = genExprValue(e.getOperand)
 
-        // TODO: Support postfix for more than ints
-        if (tpe != jst.IntType) ???
+        val operation = e.getOperator match {
+          case INCREMENT =>
+            genBinaryOperator(
+              genExprValue(e.getOperand),
+              js.IntLiteral(value = 1),
+              jdt.InfixExpression.Operator.PLUS
+            )
+          case DECREMENT =>
+            genBinaryOperator(
+              genExprValue(e.getOperand),
+              js.IntLiteral(value = 1),
+              jdt.InfixExpression.Operator.MINUS
+            )
+        }
 
-        val assignment = js.Assign(
-          lhs,
-          js.BinaryOp(js.BinaryOp.Int_+, lhs, js.IntLiteral(1))
-        )
+        val assignment = js.Assign(expr, cast(operation, expr.tpe))
 
         if (returningValue) {
+          val tempVar = js.LocalIdent(jsn.LocalName(TextUtils.freshName("temp")))
+
           js.Block(
             // Store the current value locally
             js.VarDef(
               tempVar,
               NoOriginalName,
-              tpe,
+              expr.tpe,
               mutable = false,
-              lhs
+              expr
             ),
 
-            // Increment
+            // Do the operator
             assignment,
 
             // Return the original value
-            js.VarRef(tempVar)(tpe)
+            js.VarRef(tempVar)(expr.tpe)
           )
         }
         else {
           assignment
         }
 
-      case e: jdt.PrefixExpression => ???
+      case e: jdt.PrefixExpression =>
+        import jdt.PrefixExpression.Operator._
+        val expr = genExprValue(e.getOperand)
+
+        e.getOperator match {
+          case COMPLEMENT =>
+            // JLS14 15.5.5: In all cases, ~x equals (-x)-1.
+            genBinaryOperator(
+              genBinaryOperator(
+                js.IntLiteral(value = 0),
+                unboxed(expr),
+                jdt.InfixExpression.Operator.MINUS
+              ),
+              js.IntLiteral(value = 1),
+              jdt.InfixExpression.Operator.MINUS
+            )
+          case INCREMENT =>
+            val operation = genBinaryOperator(
+              unboxed(expr),
+              js.IntLiteral(value = 1),
+              jdt.InfixExpression.Operator.PLUS
+            )
+            js.Block(
+              js.Assign(expr, cast(operation, expr.tpe)),
+              if (returningValue) expr else js.Skip()
+            )
+          case DECREMENT =>
+            val operation = genBinaryOperator(
+              unboxed(expr),
+              js.IntLiteral(value = 1),
+              jdt.InfixExpression.Operator.MINUS
+            )
+            js.Block(
+              js.Assign(expr, cast(operation, expr.tpe)),
+              if (returningValue) expr else js.Skip()
+            )
+          case MINUS =>
+            genBinaryOperator(
+              js.IntLiteral(value = 0),
+              unboxed(expr),
+              jdt.InfixExpression.Operator.MINUS
+            )
+          case NOT => js.UnaryOp(
+            js.UnaryOp.Boolean_!, unboxed(expr),
+          )
+          case PLUS =>
+            // Do a plus binary op to reliably convert to the appropriate
+            // numeric type
+            genBinaryOperator(
+              js.IntLiteral(value = 0),
+              unboxed(expr),
+              jdt.InfixExpression.Operator.PLUS
+            )
+        }
 
       case e: jdt.QualifiedName =>
         val vb = e.resolveBinding().asInstanceOf[jdt.IVariableBinding]
@@ -1000,12 +1062,13 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     }
   }
 
-  def genBinaryOperator(lhsIn: js.Tree, rhsIn: js.Tree, outType: jst.Type,
+  def genBinaryOperator(lhsIn: js.Tree, rhsIn: js.Tree,
                         jdtOp: jdt.InfixExpression.Operator)
                        (implicit pos: Position): js.Tree = {
     import jdt.InfixExpression.Operator._
     import org.scalajs.ir.Trees.BinaryOp._
 
+    val outType = getBinaryOpResultType(lhsIn.tpe, rhsIn.tpe)
     val lhs = cast(lhsIn, outType)
     val rhs = cast(rhsIn, if (isShift(jdtOp)) jst.IntType else outType)
 

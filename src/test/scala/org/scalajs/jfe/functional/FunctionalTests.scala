@@ -5,8 +5,27 @@ import org.scalajs.jfe.util.TextUtils
 import org.scalatest.BeforeAndAfter
 import org.scalatest.funspec.AnyFunSpec
 
+case class NumericTestType(name: String, max: AnyVal)
+
 class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
   import org.scalajs.jfe.TestUtils._
+
+  val NumericTestTypes = Set(
+    NumericTestType("byte", Byte.MaxValue),
+    NumericTestType("Byte", Byte.MaxValue),
+    NumericTestType("char", Char.MaxValue),
+    NumericTestType("Character", Char.MaxValue),
+    NumericTestType("short", Short.MaxValue),
+    NumericTestType("Short", Short.MaxValue),
+    NumericTestType("int", Int.MaxValue),
+    NumericTestType("Integer", Int.MaxValue),
+    NumericTestType("long", Long.MaxValue),
+    NumericTestType("Long", Long.MaxValue),
+    NumericTestType("float", Float.MaxValue),
+    NumericTestType("Float", Float.MaxValue),
+    NumericTestType("double", Double.MaxValue),
+    NumericTestType("Double", Double.MaxValue),
+  )
 
   before {
     TextUtils.clearFreshNames()
@@ -133,6 +152,236 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |}""".stripMargin
       assertRun(src, Seq(30))
     }
+
+    it("increments variables") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        byte b = 10;
+          |        char c = 'a';
+          |        short s = 20;
+          |        int i = 30;
+          |        long l = 40;
+          |        float f = 50f;
+          |        double d = 60.0;
+          |        System.out.println(b++);
+          |        System.out.println(c++);
+          |        System.out.println(s++);
+          |        System.out.println(i++);
+          |        System.out.println(l++);
+          |        System.out.println(f++);
+          |        System.out.println(d++);
+          |        System.out.println(b);
+          |        System.out.println(c);
+          |        System.out.println(s);
+          |        System.out.println(i);
+          |        System.out.println(l);
+          |        System.out.println(f);
+          |        System.out.println(d);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(10, "a", 20, 30, 40, 50, 60,
+        11, "b", 21, 31, 41, 51, 61))
+    }
+
+    it("decrements variables") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        byte b = 10;
+          |        char c = 'a';
+          |        short s = 20;
+          |        int i = 30;
+          |        long l = 40;
+          |        float f = 50f;
+          |        double d = 60.0;
+          |        System.out.println(b--);
+          |        System.out.println(c--);
+          |        System.out.println(s--);
+          |        System.out.println(i--);
+          |        System.out.println(l--);
+          |        System.out.println(f--);
+          |        System.out.println(d--);
+          |        System.out.println(b);
+          |        System.out.println(c);
+          |        System.out.println(s);
+          |        System.out.println(i);
+          |        System.out.println(l);
+          |        System.out.println(f);
+          |        System.out.println(d);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(10, "a", 20, 30, 40, 50, 60,
+        9, "`", 19, 29, 39, 49, 59))
+    }
+
+    it("prefix increments variables") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        byte b = 10;
+          |        char c = 'a';
+          |        short s = 20;
+          |        int i = 30;
+          |        long l = 40;
+          |        float f = 50f;
+          |        double d = 60.0;
+          |        System.out.println(++b);
+          |        System.out.println(++c);
+          |        System.out.println(++s);
+          |        System.out.println(++i);
+          |        System.out.println(++l);
+          |        System.out.println(++f);
+          |        System.out.println(++d);
+          |        System.out.println(b);
+          |        System.out.println(c);
+          |        System.out.println(s);
+          |        System.out.println(i);
+          |        System.out.println(l);
+          |        System.out.println(f);
+          |        System.out.println(d);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(11, "b", 21, 31, 41, 51, 61,
+        11, "b", 21, 31, 41, 51, 61))
+    }
+
+    it("prefix decrements variables") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        byte b = 10;
+          |        char c = 'a';
+          |        short s = 20;
+          |        int i = 30;
+          |        long l = 40;
+          |        float f = 50f;
+          |        double d = 60.0;
+          |        System.out.println(--b);
+          |        System.out.println(--c);
+          |        System.out.println(--s);
+          |        System.out.println(--i);
+          |        System.out.println(--l);
+          |        System.out.println(--f);
+          |        System.out.println(--d);
+          |        System.out.println(b);
+          |        System.out.println(c);
+          |        System.out.println(s);
+          |        System.out.println(i);
+          |        System.out.println(l);
+          |        System.out.println(f);
+          |        System.out.println(d);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(9, "`", 19, 29, 39, 49, 59,
+        9, "`", 19, 29, 39, 49, 59))
+    }
+
+    it("prefix complements booleans") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        boolean bt = true;
+          |        boolean bf = false;
+          |        Boolean Bt = true;
+          |        Boolean Bf = false;
+          |        System.out.println(!bt);
+          |        System.out.println(!bf);
+          |        System.out.println(!Bt);
+          |        System.out.println(!Bf);
+          |        System.out.println(bt);
+          |        System.out.println(bf);
+          |        System.out.println(Bt);
+          |        System.out.println(Bf);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(false, true, false, true,
+        true, false, true, false))
+    }
+
+    it("prefix complements integral primitives") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        byte b = 10;
+          |        char c = 'a';
+          |        short s = 20;
+          |        int i = 30;
+          |        long l = 40;
+          |        System.out.println(~b);
+          |        System.out.println(~c);
+          |        System.out.println(~s);
+          |        System.out.println(~i);
+          |        System.out.println(~l);
+          |        System.out.println(b);
+          |        System.out.println(c);
+          |        System.out.println(s);
+          |        System.out.println(i);
+          |        System.out.println(l);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(-11, -98, -21, -31, -41,
+        10, "a", 20, 30, 40))
+    }
+
+    // TODO: Test arithmetic operators with boxed classes
+    //  Do this by dynamically generating test cases
+
+    it("prefix negates primitives") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        byte b = 10;
+          |        char c = 'a';
+          |        short s = 20;
+          |        int i = 30;
+          |        long l = 40;
+          |        float f = 50f;
+          |        double d = 60.0;
+          |        System.out.println(-b);
+          |        System.out.println(-c);
+          |        System.out.println(-s);
+          |        System.out.println(-i);
+          |        System.out.println(-l);
+          |        System.out.println(-f);
+          |        System.out.println(-d);
+          |        System.out.println(b);
+          |        System.out.println(c);
+          |        System.out.println(s);
+          |        System.out.println(i);
+          |        System.out.println(l);
+          |        System.out.println(f);
+          |        System.out.println(d);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(-10, -97, -20, -30, -40, -50, -60,
+        10, "a", 20, 30, 40, 50, 60))
+    }
+
+    it("prefix pluses primitives") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        byte b = 10;
+          |        char c = 'a';
+          |        short s = 20;
+          |        int i = 30;
+          |        long l = 40;
+          |        float f = 50f;
+          |        double d = 60.0;
+          |        System.out.println(+b);
+          |        System.out.println(+c);
+          |        System.out.println(+s);
+          |        System.out.println(+i);
+          |        System.out.println(+l);
+          |        System.out.println(+f);
+          |        System.out.println(+d);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(10, 97, 20, 30, 40, 50, 60))
+    }
+
+
   }
 
   describe("Instances:") {
@@ -686,7 +935,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
 
     it("supports static parameterized methods") {
       val src =
-          """class Main {
+        """class Main {
           |    static <T> T[] setHead(T[] arr, T item) { arr[0] = item; return arr; }
           |    public static void main() {
           |        Object[] arr = new Object[] { new Object(), new Object() };
