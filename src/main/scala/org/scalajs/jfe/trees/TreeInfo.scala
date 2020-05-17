@@ -1,48 +1,59 @@
 package org.scalajs.jfe.trees
 
+import org.scalajs.jfe.trees.TreeHelpers._
+
 import org.eclipse.jdt.core.{dom => jdt}
-
-import org.scalajs.ir.{Names => jsn, Trees => js, Types => jst}
-import org.scalajs.ir.Position
-
+import org.scalajs.ir.{OriginalName, Position, Names => jsn, Trees => js, Types => jst}
 import org.scalajs.jfe.util.TypeUtils._
 
-case class MethodInfo private(originalBinding: jdt.IMethodBinding,
-                              paramTypes: List[jst.Type],
-                              returnType: jst.Type,
-                              ident: js.MethodIdent,
-                              declaringClassName: jsn.ClassName) {
-  def declaringClassType: jst.ClassType = jst.ClassType(declaringClassName)
+/**
+ * MethodInfo encapsulates several commonly-used bits of data about a method,
+ * including namespace, type, and identity info. It bridges the gap between the
+ * data structures of JDT and SJS.
+ */
+case class MethodInfo(binding: jdt.IMethodBinding) {
+  private val decl = binding.getMethodDeclaration
 
-  def isStatic: Boolean = jdt.Modifier.isStatic(originalBinding.getModifiers)
+  val declaringClassName: jsn.ClassName = jsn.ClassName(binding.getDeclaringClass.getQualifiedName)
+  val declaringClassType: jst.ClassType = jst.ClassType(declaringClassName)
+  val isStatic: Boolean = jdt.Modifier.isStatic(binding.getModifiers)
+  val paramTypes: List[jst.Type] = decl.getParameterTypes
+    .map(t => t.getErasure)
+    .map(sjsType)
+    .toList
+  val returnType: jst.Type = sjsType(decl.getReturnType)
 
   def genArgs(args: Seq[js.Tree])
              (implicit pos: Position): List[js.Tree] =
     args.zip(paramTypes)
-    .map { case (arg, tpe) => cast(arg, tpe) }
-    .toList
-}
-
-object MethodInfo {
-  def apply(mb: jdt.IMethodBinding)
-           (implicit pos: Position): MethodInfo = {
-    val decl = mb.getMethodDeclaration
-    val paramTypes = decl.getParameterTypes
-      .map(t => t.getErasure)
-      .map(sjsType)
+      .map { case (arg, tpe) => cast(arg, tpe) }
       .toList
-    val returnType = sjsType(decl.getReturnType.getErasure)
-    val ident = if (mb.isConstructor)
+
+
+  def genParamDefs(params: List[jdt.SingleVariableDeclaration])
+                  (implicit pos: Position): List[js.ParamDef] = {
+    // It would be cool if the method binding gave us the parameter names, but
+    // alas, we have to ask the client to pass them explicitly
+    params.map { p =>
+      js.ParamDef(
+        js.LocalIdent(jsn.LocalName(p.getName.getIdentifier)),
+        OriginalName.NoOriginalName,
+        sjsType(p.getType.resolveBinding),
+        mutable = isMutable(p.resolveBinding),
+        rest = p.isVarargs
+      )
+    }
+  }
+
+  def genParamDefs(params: java.util.List[_])
+                  (implicit pos: Position): List[js.ParamDef] =
+    genParamDefs(params.asScala[jdt.SingleVariableDeclaration])
+
+  def ident(implicit pos: Position): js.MethodIdent =
+    if (binding.isConstructor)
       js.MethodIdent(jsn.MethodName.constructor(paramTypes.map(sjsTypeRef)))
     else
       js.MethodIdent(jsn.MethodName(
-        mb.getName, paramTypes.map(sjsTypeRef), sjsTypeRef(returnType)
+        binding.getName, paramTypes.map(sjsTypeRef), sjsTypeRef(returnType)
       ))
-    val declaringClassName = jsn.ClassName(mb.getDeclaringClass.getQualifiedName)
-
-    MethodInfo(mb, paramTypes, returnType, ident, declaringClassName)
-  }
-
-  def apply(method: jdt.MethodInvocation)(implicit pos: Position): MethodInfo =
-    MethodInfo(method.resolveMethodBinding)
 }

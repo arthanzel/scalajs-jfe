@@ -33,7 +33,7 @@ object TestUtils {
       s"""package test;
          |class Test {
          |  void test() {
-         |    ${javaStatements}
+         |    $javaStatements
          |  }
          |}
          |""".stripMargin)
@@ -57,10 +57,16 @@ object TestUtils {
     assertIREquals(testStatements, sjsirStatements, msg)
   }
 
-  def assertRun(javaCode: String, expectedOut: String): Unit = {
+  def assertRun(_javaCode: String, expectedOut: String): Unit = {
+    // Convenience: put everything under the "test" package
+    val javaCode =
+      if (!_javaCode.startsWith("package test;\n"))
+        "package test;\n" + _javaCode
+      else _javaCode
+
     // Remember to add \n to expectedOut
     val asts = ASTUtils.javaToSJS(javaCode)
-    val linked = Runner.link(asts, new ScalaConsoleLogger(Level.Error), "Main")
+    val linked = Runner.link(asts, new ScalaConsoleLogger(Level.Error), "test.Main")
 
     val jsEnv = new nodejs.NodeJSEnv()
     val input = Seq(Input.Script(linked))

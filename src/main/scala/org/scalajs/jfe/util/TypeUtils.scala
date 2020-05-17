@@ -53,7 +53,14 @@ object TypeUtils {
     jdt.Modifier.isStatic(m.getModifiers)
 
   def isMutable(vb: jdt.IVariableBinding): Boolean =
-    !jdt.Modifier.isFinal(vb.getModifiers) && !vb.isEffectivelyFinal
+    if (vb.isField && isStatic(vb)) {
+      // Static fields cannot be 'val' because they must be assigned in a
+      // synthetic static initializer
+      true
+    }
+    else {
+      !jdt.Modifier.isFinal(vb.getModifiers) && !vb.isEffectivelyFinal
+    }
 
   def memberNamespace(m: Int): js.MemberNamespace = {
     import jdt.Modifier

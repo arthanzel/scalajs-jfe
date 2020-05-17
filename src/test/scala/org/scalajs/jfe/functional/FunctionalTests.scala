@@ -131,7 +131,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |        System.out.println(10 + 20);
           |    }
           |}""".stripMargin
-      assertRun(src, Seq(30));
+      assertRun(src, Seq(30))
     }
   }
 
@@ -297,6 +297,75 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    }
           |}""".stripMargin
       assertRun(src, Seq("zero", 10, 30, 40))
+    }
+
+    it("implicitly calls a super constructor") {
+      val src =
+        """class Other {
+          |    public Other() {
+          |        System.out.println("other");
+          |    }
+          |}
+          |class Main extends Other {
+          |    public Main() {
+          |        System.out.println("main");
+          |    }
+          |
+          |    public static void main() {
+          |        Main main = new Main();
+          |    }
+          |}
+          |
+          |""".stripMargin
+      assertRun(src, Seq("other", "main"))
+    }
+
+    it("explicitly calls a super constructor") {
+      val src =
+        """class Other {
+          |    public Other() {
+          |        System.out.println("other");
+          |    }
+          |}
+          |class Main extends Other {
+          |    public Main() {
+          |        super();
+          |        System.out.println("main");
+          |    }
+          |
+          |    public static void main() {
+          |        Main main = new Main();
+          |    }
+          |}
+          |
+          |""".stripMargin
+      assertRun(src, Seq("other", "main"))
+    }
+
+    it("explicitly calls an overloaded super constructor") {
+      val src =
+        """class Other {
+          |    public Other() {
+          |        System.out.println("other 0");
+          |    }
+          |    public Other(String str) {
+          |        System.out.println("other 1");
+          |        System.out.println(str);
+          |    }
+          |}
+          |class Main extends Other {
+          |    public Main() {
+          |        super("arg");
+          |        System.out.println("main");
+          |    }
+          |
+          |    public static void main() {
+          |        Main main = new Main();
+          |    }
+          |}
+          |
+          |""".stripMargin
+      assertRun(src, Seq("other 1", "arg", "main"))
     }
 
     it("accesses members from other custom classes") {
@@ -514,21 +583,36 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
     }
   }
 
-  describe("Classes") {}
+  describe("Classes") {
+    it("defines an inner class") {
+      val src =
+        """package test;
+          |class Main {
+          |    class Inner {
+          |        static final String constant = "constant";
+          |        String instance = "instance";
+          |        String method() {
+          |            return "method";
+          |        }
+          |    }
+          |
+          |    public Main() {
+          |        System.out.println(Inner.constant);
+          |        System.out.println(new Inner().instance);
+          |        System.out.println(new Inner().method());
+          |    }
+          |
+          |    public static void main() {
+          |        new Main();
+          |    }
+          |}""".stripMargin
+      ASTUtils.javaToSJS(src).map(_.show).foreach(println)
+      assertRun(src, Seq("constant", "instance", "method"))
+    }
+  }
 
   describe("Generics") {
-    it("sandbox") {
-      val scala =
-        """import java.util.LinkedList;
-          |object Main {
-          |  val l = new LinkedList[String]();
-          |  l.add("foo");
-          |  System.out.println(l.get(0));
-          |}""".stripMargin
-      ASTUtils.compileString(scala).map(_.show).foreach(println)
-
-      println("\n\n====== Java ======\n\n")
-
+    it("calls generic methods on JDK classes") {
       val src =
         """import java.util.LinkedList;
           |class Main {
@@ -549,7 +633,6 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |        System.out.println(strings.get(1));
           |    }
           |}""".stripMargin
-      ASTUtils.javaToSJS(src).map(_.show).foreach(println)
       assertRun(src, Seq(10, 20, "one", "two"))
     }
   }
