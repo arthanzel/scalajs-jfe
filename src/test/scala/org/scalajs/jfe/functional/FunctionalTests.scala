@@ -381,7 +381,17 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq(10, 97, 20, 30, 40, 50, 60))
     }
 
-
+    it("supports extended operands") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        System.out.println(1 + 2 + 3 + 4 + 5 + 6);
+          |        System.out.println(1 * 2 * 3 * 4 * 5 * 6);
+          |        System.out.println("a" + "b" + "c" + 10);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(21, 720, "abc10"))
+    }
   }
 
   describe("Instances:") {
@@ -678,12 +688,14 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
         """class A {
           |    public String field = "fieldA";
           |    public String method() { return "methodA"; }
+          |    public String superOnlyMethod() { return "superOnly"; }
           |}
           |class B extends A {
           |    public String field = "fieldB";
           |    public String method() { return "methodB"; }
           |    public String superField() { return super.field; }
           |    public String superMethod() { return super.method(); }
+          |    public String callSuperOnlyMethod() { return superOnlyMethod(); }
           |}
           |class Main {
           |    public static void main() {
@@ -692,10 +704,13 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |        System.out.println(b.method());
           |        System.out.println(b.superField());
           |        System.out.println(b.superMethod());
+          |        System.out.println(b.superOnlyMethod());
+          |        System.out.println(b.callSuperOnlyMethod());
           |    }
           |}
           |""".stripMargin
-      assertRun(src, Seq("fieldB", "methodB", "fieldA", "methodA"))
+      assertRun(src, Seq("fieldB", "methodB", "fieldA", "methodA", "superOnly",
+        "superOnly"))
     }
   }
 

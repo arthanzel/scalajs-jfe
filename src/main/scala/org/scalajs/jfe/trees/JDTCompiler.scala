@@ -184,10 +184,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
     val body: Seq[js.MemberDef] =
       sjsFieldDefs ++
-      outerFieldSynthetic ++
-      staticSynthetics ++
-      sjsMethods ++
-      ctors
+        outerFieldSynthetic ++
+        staticSynthetics ++
+        sjsMethods ++
+        ctors
 
     // Generate class def
     val classDef = js.ClassDef(
@@ -570,7 +570,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case s: jdt.DoStatement =>
         js.DoWhile(genStatement(s.getBody), genExprValue(s.getExpression))
 
-      case s: jdt.EmptyStatement =>
+      case _: jdt.EmptyStatement =>
         js.Skip()
 
       case s: jdt.EnhancedForStatement => js.ForIn(
@@ -598,7 +598,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
                       // Updaters
                       s.updaters.asScala[jdt.Expression]
-                        .map(genExprValue(_))
+                        .map(genExprStatement)
                   )
                 }
               )
@@ -651,7 +651,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           )
         )(jst.NoType)
 
-      case s: jdt.SwitchCase =>
+      case _: jdt.SwitchCase =>
         throw new JavaCompilationException("Encountered case outside of a switch statement")
 
       case s: jdt.SwitchStatement =>
@@ -679,9 +679,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
       case s: jdt.ThrowStatement => js.Throw(genExprValue(s.getExpression))
 
-      case s: jdt.TryStatement => ???
+      case _: jdt.TryStatement => ???
 
-      case s: jdt.TypeDeclarationStatement => ???
+      case _: jdt.TypeDeclarationStatement => ???
 
       case s: jdt.VariableDeclarationStatement =>
         val tpe = sjsType(s.getType.resolveBinding)
@@ -831,24 +831,29 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         genSelect(genExprValue(e.getExpression), e.resolveFieldBinding)
 
       case e: jdt.InfixExpression =>
-        // TODO: Fold left extended operands
-        if (e.hasExtendedOperands) ???
-
         val lhs = genExprValue(e.getLeftOperand)
         val rhs = genExprValue(e.getRightOperand)
 
-        if (isStringy(lhs)) {
-          // String concatenation
-          js.BinaryOp(
-            js.BinaryOp.String_+,
-            lhs,
-            cast(rhs, JDKStringType)
-          )
-        }
-        else {
-          // TODO: Shift ops
-          // Arithmetic or logical op
-          genBinaryOperator(lhs, rhs, e.getOperator)
+        val rights =
+          if (e.hasExtendedOperands)
+            rhs :: e.extendedOperands.asScala[jdt.Expression]
+              .map(genExprValue(_))
+          else List(rhs)
+
+        rights.foldLeft(lhs) { case (lhs, rhs) =>
+          if (isStringy(lhs)) {
+            // String concatenation
+            js.BinaryOp(
+              js.BinaryOp.String_+,
+              lhs,
+              cast(rhs, JDKStringType)
+            )
+          }
+          else {
+            // TODO: Shift ops
+            // Arithmetic or logical op
+            genBinaryOperator(lhs, rhs, e.getOperator)
+          }
         }
 
       case e: jdt.InstanceofExpression =>
@@ -865,7 +870,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         val mi = MethodInfo(e.resolveMethodBinding)
         val args = mi.genArgs(e.arguments.asScala[jdt.Expression].map(genExprValue(_)))
 
-
         val tree =
           if (mi.isStatic) {
             js.ApplyStatic(js.ApplyFlags.empty, mi.declaringClassName, mi.ident,
@@ -875,20 +879,24 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             // Instance call
             val receiver = Option(e.getExpression) match {
               case None =>
-                if (mi.declaringClassName.equals(thisClassName))
+                if (mi.declaringClassName.equals(thisClassName)) {
+                  // Implicit `this` receiver
                   js.This()(thisClassType)
+                }
                 else if (outerClassNames.contains(mi.declaringClassName)) {
                   // Method is defined in an enclosing type
+                  // Select the chain of outers as the receiver
                   genOuterSelect(mi.declaringClassName)
                 }
                 else {
-                  // Probably an override
+                  // Implicit superclass receiver
                   js.This()(jst.ClassType(mi.declaringClassName))
                 }
               case Some(expr) =>
                 // Receiver is specified
                 genExprValue(expr)
             }
+
             js.Apply(js.ApplyFlags.empty, receiver, mi.ident,
               args)(mi.returnType)
           }
@@ -897,11 +905,14 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         // Cast the result of the call to the proper type
         staticCast(tree, mi.invocationReturnType)
 
-      case e: jdt.NullLiteral => js.Null()
+      case _: jdt.NullLiteral => js.Null()
 
       case e: jdt.NumberLiteral =>
         val expectedType = sjsType(e.resolveTypeBinding)
         val value = e.resolveConstantExpressionValue()
+
+        // Keep the literal type. It shall be casted to the correct type at the
+        // usage site.
         expectedType match {
           case jst.DoubleType => js.DoubleLiteral(e.getToken.toDouble)
           case jst.FloatType => js.FloatLiteral(e.getToken.toFloat)
@@ -1014,6 +1025,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         }
 
       case e: jdt.QualifiedName =>
+        // TODO: Can qualified names refer to methods or types?
         val vb = e.resolveBinding().asInstanceOf[jdt.IVariableBinding]
         if (isStatic(vb)) {
           // Static members are accessed via a synthetic getter
@@ -1064,7 +1076,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         )(sjsType(e.resolveFieldBinding.getType))
 
       case e: jdt.SuperMethodInvocation =>
-        // TODO: Factor out method name and args generation
         val mb = e.resolveMethodBinding
 
         val paramTypes = mb.getParameterTypes.map(sjsType)
