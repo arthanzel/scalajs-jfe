@@ -103,8 +103,8 @@ object TypeUtils {
     else if (t.isArray) {
       jst.ArrayType(sjsArrayTypeRef(t))
     }
-    else if (t.isClass && t.getQualifiedName == "java.lang.Object") jst.AnyType
-    else if (t.isClass) jst.ClassType(jsn.ClassName(t.getQualifiedName))
+    else if (t.isClass && t.getBinaryName == "java.lang.Object") jst.AnyType
+    else if (t.isClass) jst.ClassType(jsn.ClassName(t.getBinaryName))
     else {
       ???
     }
@@ -121,7 +121,7 @@ object TypeUtils {
     val t = _t.getErasure
     if (t.isPrimitive) sjsType(t).asInstanceOf[jst.PrimTypeWithRef].primRef
     else if (t.isArray) sjsArrayTypeRef(t)
-    else if (t.isClass) jst.ClassRef(jsn.ClassName(t.getQualifiedName))
+    else if (t.isClass) jst.ClassRef(jsn.ClassName(t.getBinaryName))
     else {
       ???
     }

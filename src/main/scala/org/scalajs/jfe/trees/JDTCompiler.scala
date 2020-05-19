@@ -11,11 +11,13 @@ object JDTCompiler {
 
   import TreeHelpers._
 
-  private val NoOriginalName = OriginalName.NoOriginalName
-  private val NoOptimizerHints = OptimizerHints.empty
-  private val NoPosition = Position.NoPosition
-  private val WithConstructorFlags = js.ApplyFlags.empty.withConstructor(true)
-  private val WithConstructorNS = js.MemberFlags.empty.withNamespace(js.MemberNamespace.Constructor)
+  private[jfe] val NoOriginalName = OriginalName.NoOriginalName
+  private[jfe] val NoOptimizerHints = OptimizerHints.empty
+  private[jfe] val NoPosition = Position.NoPosition
+  private[jfe] val WithConstructorFlags = js.ApplyFlags.empty.withConstructor(true)
+  private[jfe] val WithConstructorNS = js.MemberFlags.empty.withNamespace(js.MemberNamespace.Constructor)
+  private[jfe] val OuterFieldIdent = js.FieldIdent(jsn.FieldName("$sjsirOuter"))(NoPosition)
+  private[jfe] val OuterLocalIdent = js.LocalIdent(jsn.LocalName("$sjsirOuter"))(NoPosition)
 
   def apply(compilationUnit: jdt.CompilationUnit): List[js.ClassDef] =
     compilationUnit.types().asScala[jdt.AbstractTypeDeclaration]
@@ -61,10 +63,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     Some(compilationUnit.getPackage.getName.getFullyQualifiedName)
   }
 
-  def qualifiedName(name: String): String = {
-    Seq(packageName, Some(name)).flatten.mkString(".")
-  }
-
   val qualifiedThis: String = topLevel.resolveBinding.getBinaryName
   val thisClassName: jsn.ClassName = jsn.ClassName(qualifiedThis)
   val thisClassType: jst.ClassType = jst.ClassType(thisClassName)
@@ -94,6 +92,11 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     continueScope.withValue(freshName("_continue")) { label =>
       js.Labeled(js.LabelIdent(jsn.LabelName(label)), tpe, body)
     }
+
+  private var outerClassNames: List[jsn.ClassName] = List()
+  private val isNested: Boolean = topLevel.resolveBinding.isNested
+  private lazy val enclosingName = outerClassNames.head
+  private lazy val enclosingType = jst.ClassType(enclosingName)
 
   // endregion
 
@@ -158,7 +161,14 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           jdtInstanceFields))
       else
         jdtConstructors.map(genConstructor(_, superClassName,
-          jdtInstanceFields)).toSeq
+          jdtInstanceFields.toList)).toSeq
+
+    val outerFieldSynthetic =
+      if (isNested)
+        Some(js.FieldDef(js.MemberFlags.empty, OuterFieldIdent, NoOriginalName,
+          jst.ClassType(outerClassNames.head)))
+      else
+        None
 
     // Generate static accessors and initializers
     val staticSynthetics: Seq[js.MemberDef] =
@@ -172,7 +182,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       }
       else Nil
 
-    val body: Seq[js.MemberDef] = sjsFieldDefs ++
+    val body: Seq[js.MemberDef] =
+      sjsFieldDefs ++
+      outerFieldSynthetic ++
       staticSynthetics ++
       sjsMethods ++
       ctors
@@ -191,14 +203,14 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       List()
     )(NoOptimizerHints)
 
-    // Return a Seq because a class might define other inner classes
+    // Generate class defs for inner types
     val innerTypes = cls.getTypes
       .flatMap { t =>
-        t.getName.setIdentifier(
-          s"${topLevel.getName.getIdentifier}$$${t.getName.getIdentifier}"
-        )
-        new JDTCompiler(compilationUnit, t).gen()
+        val compiler = new JDTCompiler(compilationUnit, t)
+        compiler.outerClassNames = thisClassName :: outerClassNames
+        compiler.gen()
       }
+
     classDef +: innerTypes
   }
 
@@ -257,23 +269,34 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
    */
   def genDefaultConstructor(superClassName: jsn.ClassName, fieldDecls: Seq[jdt.FieldDeclaration])
                            (implicit pos: Position): js.MethodDef = {
-    val constructorIdent = js.MethodIdent(jsn.MethodName.constructor(Nil))
+    val params = if (isNested) List(sjsTypeRef(enclosingType)) else Nil
+    val constructorIdent = js.MethodIdent(jsn.MethodName.constructor(params))
+    val paramDefs =
+      if (isNested)
+        List(js.ParamDef(js.LocalIdent(jsn.LocalName(OuterFieldIdent.name.nameString)),
+          NoOriginalName, enclosingType, mutable = false, rest = false))
+      else Nil
+
+    // TODO: What happens if enclosing classes have an enclosing super?
+    val superConstructorIdent = js.MethodIdent(jsn.MethodName.constructor(Nil))
     val superConstructorCall = js.ApplyStatically(
       WithConstructorFlags,
       thisNode,
       superClassName,
-      constructorIdent,
+      superConstructorIdent,
       List()
     )(jst.NoType)
+
     val fieldInitializers = fieldDecls.flatMap(genFieldInitializers)
+    val body = superConstructorCall :: genSetOuter() :: fieldInitializers.toList
 
     js.MethodDef(
       WithConstructorNS,
       constructorIdent,
       NoOriginalName,
-      List(),
+      paramDefs,
       jst.NoType,
-      Some(js.Block(superConstructorCall +: fieldInitializers.toList))
+      Some(js.Block(body))
     )(NoOptimizerHints, None)
   }
 
@@ -301,13 +324,16 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
    */
   def genConstructor(method: jdt.MethodDeclaration,
                      superClassName: jsn.ClassName,
-                     fieldDecls: Seq[jdt.FieldDeclaration]): js.MethodDef = {
+                     fieldDecls: List[jdt.FieldDeclaration]): js.MethodDef = {
     // TODO: Place field initializers in their own method if there are multiple
     //  top-level constructors
 
     implicit val position: Position = getPosition(method)
 
     val mi = MethodInfo(method.resolveBinding)
+    val assignOuter =
+      if (mi.isNestedConstructor) List(genSetOuter())
+      else Nil
     val stats = method.getBody.statements.asScala[jdt.Statement]
     val (prelude, body) = stats match {
       case (_: jdt.ConstructorInvocation) :: _ =>
@@ -318,7 +344,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case (sci: jdt.SuperConstructorInvocation) :: rest =>
         // This constructor explicitly calls a super-constructor
         // Call super first, THEN initialize instance fields.
-        (genStatement(sci) +: fieldDecls.flatMap(genFieldInitializers), rest)
+        (genStatement(sci) :: genSetOuter() :: fieldDecls.flatMap(genFieldInitializers), rest)
 
       case _ =>
         // This constructor does not delegate. Call the implicit super and
@@ -327,7 +353,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         val superInvocation = js.ApplyStatically(WithConstructorFlags,
           thisNode, superClassName, ident, Nil)(jst.NoType)
 
-        (superInvocation +: fieldDecls.flatMap(genFieldInitializers), stats)
+        (superInvocation :: genSetOuter() :: fieldDecls.flatMap(genFieldInitializers), stats)
     }
 
     js.MethodDef(
@@ -336,7 +362,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       NoOriginalName,
       mi.genParamDefs(method.parameters),
       jst.NoType,
-      Some(js.Block((prelude ++ body.map(genStatement)).toList))
+      Some(js.Block(prelude ::: body.map(genStatement)))
     )(NoOptimizerHints, None)
   }
 
@@ -528,7 +554,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           thisNode,
           thisClassName,
           mi.ident,
-          mi.genArgs(s.arguments.asScala[jdt.Expression].map(genExprValue(_)))
+          mi.genArgsForConstructor(
+            thisNode,
+            s.arguments.asScala[jdt.Expression].map(genExprValue(_))
+          )
         )(jst.NoType)
 
       case s: jdt.ContinueStatement => Option(s.getLabel) match {
@@ -759,8 +788,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         val mb = e.resolveConstructorBinding
         val mi = MethodInfo(mb)
         val className = jsn.ClassName(e.getType.resolveBinding.getErasure.getBinaryName)
-        val paramTypes = mb.getParameterTypes.map(sjsType)
-        val args = mi.genArgs(e.arguments.asScala[jdt.Expression].map(genExprValue(_)))
+        val args = mi.genArgsForConstructor(thisNode,
+          e.arguments.asScala[jdt.Expression].map(genExprValue(_)))
         val isHijacked = HijackedClasses.contains(className.nameString)
         val methodIdent =
           if (isHijacked)
@@ -834,6 +863,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         val mi = MethodInfo(e.resolveMethodBinding)
         val args = mi.genArgs(e.arguments.asScala[jdt.Expression].map(genExprValue(_)))
 
+
         val tree =
           if (mi.isStatic) {
             js.ApplyStatic(js.ApplyFlags.empty, mi.declaringClassName, mi.ident,
@@ -843,8 +873,18 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             // Instance call
             val receiver = Option(e.getExpression) match {
               case None =>
-                // Receiver `this` is implied
-                thisNode
+                val declaringClassName = jsn.ClassName(
+                  mi.binding.getDeclaringClass.getBinaryName)
+                if (declaringClassName.equals(thisClassName))
+                  js.This()(thisClassType)
+                else if (outerClassNames.contains(declaringClassName)) {
+                  // Method is defined in an enclosing type
+                  genOuterSelect(declaringClassName)
+                }
+                else {
+                  // Probably an override
+                  js.This()(jst.ClassType(declaringClassName))
+                }
               case Some(expr) =>
                 // Receiver is specified
                 genExprValue(expr)
@@ -1051,10 +1091,14 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case e: jdt.SwitchExpression => ???
 
       case e: jdt.ThisExpression =>
-        val qualifier = Option(e.getQualifier)
-          .map(_.getFullyQualifiedName)
-          .getOrElse(qualifiedThis)
-        js.This()(jst.ClassType(jsn.ClassName(qualifier)))
+        if (e.getQualifier == null) {
+          js.This()(thisClassType)
+        }
+        else {
+          genOuterSelect(jsn.ClassName(
+            e.getQualifier.resolveTypeBinding.getBinaryName
+          ))
+        }
 
       case e: jdt.TypeLiteral => ???
       case e: jdt.TypeMethodReference => ???
@@ -1331,6 +1375,26 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
   // endregion
 
+  def genOuterSelect(name: jsn.ClassName)
+                    (implicit pos: Position): js.Tree = {
+    if (name.equals(thisClassName)) {
+      js.This()(thisClassType)
+    }
+    else {
+      if (!outerClassNames.exists(_.equals(name))) {
+        throw new JavaCompilationException(s"Access to outer class $name but it is not in scope")
+      }
+      outerClassNames.takeUntil(!_.equals(name))
+        .foldLeft[js.Tree](js.This()(thisClassType)) { case (inner, name) =>
+          js.Select(
+            inner,
+            inner.tpe.asInstanceOf[jst.ClassType].className,
+            OuterFieldIdent
+          )(jst.ClassType(name))
+        }
+    }
+  }
+
   def genSelect(qualifier: js.Tree, vb: jdt.IVariableBinding)
                (implicit pos: Position): js.Tree = {
     val tree = js.Select(
@@ -1340,6 +1404,14 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     )(sjsType(vb.getVariableDeclaration.getType))
     staticCast(tree, sjsType(vb.getType))
   }
+
+  def genSetOuter()(implicit pos: Position): js.Tree =
+    if (isNested)
+      js.Assign(
+        js.Select(thisNode, thisClassName, OuterFieldIdent)(enclosingType),
+        js.VarRef(OuterLocalIdent)(enclosingType)
+      )
+    else js.Skip()
 
   /**
    * Convenience method to throw an NPE. Used in routines that have runtime

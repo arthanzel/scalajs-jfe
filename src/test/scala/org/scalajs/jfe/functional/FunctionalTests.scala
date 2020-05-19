@@ -857,6 +857,37 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |}""".stripMargin
       assertRun(src, Seq("constant", "instance", "method"))
     }
+
+    it("calls outer methods from inner classes") {
+      val src =
+        """class Main {
+          |    class Inner1 {
+          |        class Inner2 {
+          |            public Inner2() {
+          |                System.out.println("inner2");
+          |                inner1Print();
+          |                mainPrint();
+          |            }
+          |        }
+          |        public Inner1() {
+          |            new Inner2();
+          |        }
+          |        public void inner1Print() {
+          |            System.out.println("inner1");
+          |            mainPrint();
+          |        }
+          |    }
+          |    public void mainPrint() {
+          |        System.out.println("main");
+          |    }
+          |    Main() { new Inner1(); }
+          |    public static void main() {
+          |        new Main();
+          |    }
+          |}""".stripMargin
+      ASTUtils.javaToSJS(src).map(_.show).foreach(println)
+      assertRun(src, Seq("inner2", "inner1", "main", "main"))
+    }
   }
 
   describe("Generics") {
