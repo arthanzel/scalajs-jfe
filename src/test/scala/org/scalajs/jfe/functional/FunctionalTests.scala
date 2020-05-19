@@ -835,8 +835,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
   describe("Classes") {
     it("defines an inner class") {
       val src =
-        """package test;
-          |class Main {
+        """class Main {
           |    class Inner {
           |        static final String constant = "constant";
           |        String instance = "instance";
@@ -885,8 +884,25 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |        new Main();
           |    }
           |}""".stripMargin
-      ASTUtils.javaToSJS(src).map(_.show).foreach(println)
       assertRun(src, Seq("inner2", "inner1", "main", "main"))
+    }
+
+    it("inherits from inner classes with different scopes") {
+      val src =
+        """class Main {
+          |    void print() { System.out.println("Main"); }
+          |    class Base {
+          |        public Base() { new Inner(); print(); }
+          |        class Inner {
+          |            void print() { System.out.println("Inner"); }
+          |            class Sub { public Sub() { print(); } }
+          |            public Inner() { new Sub(); }
+          |        }
+          |    }
+          |    public Main() { new Base(); }
+          |    public static void main() { new Main(); }
+          |}""".stripMargin
+      assertRun(src, Seq("Inner", "Main"))
     }
   }
 

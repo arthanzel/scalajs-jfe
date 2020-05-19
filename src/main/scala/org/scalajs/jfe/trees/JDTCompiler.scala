@@ -256,7 +256,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
   }
 
   /*
-  If the type is implicit constructible, this method creates a synthetic
+  If the type is implicit constructable, this method creates a synthetic
   constructor taking no parameters that calls the super constructor and
   initializes all fields.
    */
@@ -332,7 +332,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
     val mi = MethodInfo(method.resolveBinding)
     val assignOuter =
-      if (mi.isNestedConstructor) List(genSetOuter())
+      if (mi.outerClassName.nonEmpty) List(genSetOuter())
       else Nil
     val stats = method.getBody.statements.asScala[jdt.Statement]
     val (prelude, body) = stats match {
@@ -554,8 +554,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           thisNode,
           thisClassName,
           mi.ident,
-          mi.genArgsForConstructor(
-            thisNode,
+          mi.genArgsForCoConstructor(
             s.arguments.asScala[jdt.Expression].map(genExprValue(_))
           )
         )(jst.NoType)
@@ -646,7 +645,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           thisNode,
           mi.declaringClassName,
           mi.ident,
-          mi.genArgs(s.arguments.asScala[jdt.Expression].map(genExprValue(_)))
+          mi.genArgsForConstructor(
+            mi.outerClassName.map(genOuterSelect),
+            s.arguments.asScala[jdt.Expression].map(genExprValue(_))
+          )
         )(jst.NoType)
 
       case s: jdt.SwitchCase =>
@@ -788,7 +790,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         val mb = e.resolveConstructorBinding
         val mi = MethodInfo(mb)
         val className = jsn.ClassName(e.getType.resolveBinding.getErasure.getBinaryName)
-        val args = mi.genArgsForConstructor(thisNode,
+        val args = mi.genArgsForConstructor(Some(thisNode),
           e.arguments.asScala[jdt.Expression].map(genExprValue(_)))
         val isHijacked = HijackedClasses.contains(className.nameString)
         val methodIdent =
@@ -873,17 +875,15 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             // Instance call
             val receiver = Option(e.getExpression) match {
               case None =>
-                val declaringClassName = jsn.ClassName(
-                  mi.binding.getDeclaringClass.getBinaryName)
-                if (declaringClassName.equals(thisClassName))
+                if (mi.declaringClassName.equals(thisClassName))
                   js.This()(thisClassType)
-                else if (outerClassNames.contains(declaringClassName)) {
+                else if (outerClassNames.contains(mi.declaringClassName)) {
                   // Method is defined in an enclosing type
-                  genOuterSelect(declaringClassName)
+                  genOuterSelect(mi.declaringClassName)
                 }
                 else {
                   // Probably an override
-                  js.This()(jst.ClassType(declaringClassName))
+                  js.This()(jst.ClassType(mi.declaringClassName))
                 }
               case Some(expr) =>
                 // Receiver is specified
