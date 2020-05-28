@@ -269,6 +269,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
    */
   def genDefaultConstructor(superClassName: jsn.ClassName, fieldDecls: Seq[jdt.FieldDeclaration])
                            (implicit pos: Position): js.MethodDef = {
+    // TODO: Use MethodInfo
     val params = if (isNested) List(sjsTypeRef(enclosingType)) else Nil
     val constructorIdent = js.MethodIdent(jsn.MethodName.constructor(params))
     val paramDefs =
@@ -277,18 +278,19 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           NoOriginalName, enclosingType, mutable = false, rest = false))
       else Nil
 
-    // TODO: What happens if enclosing classes have an enclosing super?
-    val superConstructorIdent = js.MethodIdent(jsn.MethodName.constructor(Nil))
+    val superC = MethodInfo.defaultConstructor(topLevel.resolveBinding.getSuperclass)
+    val superConstructorOuterSelect = superC.outerClassName.map(genOuterSelect)
     val superConstructorCall = js.ApplyStatically(
       WithConstructorFlags,
       thisNode,
-      superClassName,
-      superConstructorIdent,
-      List()
+      superC.declaringClassName,
+      superC.ident,
+      superConstructorOuterSelect.toList
     )(jst.NoType)
 
+    // TODO: Call static initializer
     val fieldInitializers = fieldDecls.flatMap(genFieldInitializers)
-    val body = superConstructorCall :: genSetOuter() :: fieldInitializers.toList
+    val body = genSetOuter() :: superConstructorCall :: fieldInitializers.toList
 
     js.MethodDef(
       WithConstructorNS,
@@ -1047,10 +1049,15 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         e.resolveBinding() match {
           case vb: jdt.IVariableBinding =>
             if (vb.isField && isStatic(vb)) {
+              // TODO: outer scope static
               genStaticGet(vb.getName, thisClassName, tpe)
             }
             else if (vb.isField) {
-              genSelect(thisNode, vb)
+              println("SELECT", vb.getName, vb.getDeclaringClass.getBinaryName, outerClassNames)
+              genSelect(
+                genOuterSelect(jsn.ClassName(vb.getDeclaringClass.getBinaryName)),
+                vb
+              )
             }
             else {
               // Local variable or method parameter
@@ -1389,7 +1396,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
   def genOuterSelect(name: jsn.ClassName)
                     (implicit pos: Position): js.Tree = {
     if (name.equals(thisClassName)) {
-      js.This()(thisClassType)
+      thisNode
     }
     else {
       if (!outerClassNames.exists(_.equals(name))) {

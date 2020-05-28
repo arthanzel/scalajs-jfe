@@ -919,6 +919,24 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |}""".stripMargin
       assertRun(src, Seq("Inner", "Main"))
     }
+
+    it("passes outer scope through to constructors") {
+      val src =
+        """class Main {
+          |    int a = 10;
+          |    int b = 20;
+          |    class A { void printA() { System.out.println(a); } }
+          |    class B extends A { void printB() { System.out.println(b); }}
+          |    public Main() {
+          |        B b = new B();
+          |        b.printA();
+          |        b.printB();
+          |    }
+          |    public static void main() { new Main(); }
+          |}""".stripMargin
+      ASTUtils.javaToSJS(src).foreach(f => println(f.show))
+      assertRun(src, Seq(10, 20))
+    }
   }
 
   describe("Generics") {
