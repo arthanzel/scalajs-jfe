@@ -431,6 +431,71 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq(20, 16, 64, 32, 128, 32, -8, 2147483644,
         43656, 47804, 17731));
     }
+
+    it("assignment returns assigned value") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        int i = 10;
+          |        int j = i = 15;
+          |        System.out.println(i);
+          |        System.out.println(j);
+          |        System.out.println(i = 20);
+          |        System.out.println(i);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(15, 15, 20, 20));
+    }
+
+    it("assignment returns assigned value and does not duplicate side-effect") {
+      val src =
+        """class Main {
+          |    static int value() { System.out.println("value"); return 20; }
+          |    public static void main() {
+          |        int i = 10;
+          |        int j = i = value();
+          |        System.out.println(i);
+          |        System.out.println(j);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq("value", 20, 20));
+    }
+
+    it("assignments can be chained with local and static variables") {
+      val src =
+        """class Main {
+          |    static int si;
+          |    static int sj;
+          |    public static void main() {
+          |        int i = 0; int j = 0;
+          |        i = si = j = sj = 10;
+          |        System.out.println(i); System.out.println(j);
+          |        System.out.println(si); System.out.println(sj);
+          |        si = i = sj = j = 20;
+          |        System.out.println(i); System.out.println(j);
+          |        System.out.println(si); System.out.println(sj);
+          |        si = sj = i = j = 30;
+          |        System.out.println(i); System.out.println(j);
+          |        System.out.println(si); System.out.println(sj);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(10, 10, 10, 10, 20, 20, 20, 20, 30, 30, 30, 30));
+    }
+
+    it("assignments can be chained in vardefs") {
+      val src =
+        """class Main {
+          |    static int si = 10;
+          |    static int sj = si = 20;
+          |    public static void main() {
+          |        int i = 30;
+          |        int j = i = 40;
+          |        System.out.println(i); System.out.println(j);
+          |        System.out.println(si); System.out.println(sj);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(40, 40, 20, 20));
+    }
   }
 
   describe("Instances:") {

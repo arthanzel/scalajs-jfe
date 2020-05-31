@@ -783,7 +783,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             opMap.apply(other))
         }
 
-        lhs match {
+        val assignment = lhs match {
           case sel: js.ApplyStatic =>
             // If the LHS is a (qualified) name of a static field, genExpr
             // will return a static call to its getter instead.
@@ -796,6 +796,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             )
           case _ => js.Assign(lhs, rhs)
         }
+
+        if (returningValue) js.Block(assignment, lhs)
+        else assignment
 
       case e: jdt.BooleanLiteral => js.BooleanLiteral(e.booleanValue())
 
