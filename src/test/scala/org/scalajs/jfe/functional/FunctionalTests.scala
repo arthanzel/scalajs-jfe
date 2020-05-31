@@ -123,6 +123,22 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
         assertRun(src, "two")
       }
 
+      it("handles ternary expressions") {
+        val src =
+          """class Main {
+            |    public static void main() {
+            |        int a = true ? 10 : 20;
+            |        int b = new Object() == new Object() ? 30 : 40;
+            |        String animal = "dog";
+            |        String coolness = animal == "cat" ? "cool" : "uncool";
+            |        System.out.println(a);
+            |        System.out.println(b);
+            |        System.out.println(coolness);
+            |    }
+            |}""".stripMargin
+        assertRun(src, Seq(10, 40, "uncool"));
+      }
+
       it("handles simple for loops") {
 
       }
@@ -391,6 +407,29 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    }
           |}""".stripMargin
       assertRun(src, Seq(21, 720, "abc10"))
+    }
+
+    it("supports arithmetic assigns") {
+      val src =
+        """class Main {
+          |    public static void main() {
+          |        int i = 10;
+          |        i += 10; System.out.println(i);
+          |        i -= 4; System.out.println(i);
+          |        i *= 4; System.out.println(i);
+          |        i /= 2; System.out.println(i);
+          |        i <<= 2; System.out.println(i);
+          |        i >>= 2; System.out.println(i);
+          |        i *= -1; i >>= 2; System.out.println(i);
+          |        i >>>= 1; System.out.println(i);
+          |        i = 0xaaaa;
+          |        i &= 0xabcd; System.out.println(i);
+          |        i |= 0x1234; System.out.println(i);
+          |        i ^= 0xffff; System.out.println(i);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(20, 16, 64, 32, 128, 32, -8, 2147483644,
+        43656, 47804, 17731));
     }
   }
 
@@ -934,7 +973,6 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    }
           |    public static void main() { new Main(); }
           |}""".stripMargin
-      ASTUtils.javaToSJS(src).foreach(f => println(f.show))
       assertRun(src, Seq(10, 20))
     }
   }

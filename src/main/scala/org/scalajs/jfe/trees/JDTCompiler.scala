@@ -453,7 +453,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       .filter {
         case f: jdt.FieldDeclaration
           if jdt.Modifier.isStatic(f.getModifiers) => true
-        case _: jdt.Initializer => true
+        case i: jdt.Initializer
+          if jdt.Modifier.isStatic(i.getModifiers) => true
         case _ => false
       }
 
@@ -704,6 +705,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
       case s: jdt.WhileStatement =>
         js.While(genExprValue(s.getExpression), genStatement(s.getBody))
+
+      case y: jdt.YieldStatement => ???
     }
   }
 
@@ -727,7 +730,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     // See https://docs.oracle.com/javase/specs/jls/se12/html/jls-15.html#jls-15.28
 
     expression match {
-      case e: jdt.Annotation => js.Skip()
+      case _: jdt.Annotation => js.Skip()
 
       case e: jdt.ArrayAccess =>
         js.ArraySelect(
@@ -739,10 +742,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         if (!e.dimensions.isEmpty) {
           js.NewArray(
             sjsArrayTypeRef(e.resolveTypeBinding),
-            e.dimensions.toArray
-              .map(_.asInstanceOf[jdt.Expression])
+            e.dimensions.asScala[jdt.Expression]
               .map(genExprValue(_))
-              .toList
           )
         }
         else if (e.getInitializer != null) {
@@ -762,8 +763,26 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         )
 
       case e: jdt.Assignment =>
+        import jdt.Assignment.{Operator => A}
+        import jdt.InfixExpression.{Operator => I}
+
         // TODO: Support arithmetic assignment operators
         val lhs = genExprValue(e.getLeftHandSide)
+
+        val opMap = Map(A.BIT_AND_ASSIGN -> I.AND, A.BIT_OR_ASSIGN -> I.OR,
+          A.BIT_XOR_ASSIGN -> I.XOR, A.DIVIDE_ASSIGN -> I.DIVIDE,
+          A.LEFT_SHIFT_ASSIGN -> I.LEFT_SHIFT, A.MINUS_ASSIGN -> I.MINUS,
+          A.PLUS_ASSIGN -> I.PLUS, A.REMAINDER_ASSIGN -> I.REMAINDER,
+          A.RIGHT_SHIFT_SIGNED_ASSIGN -> I.RIGHT_SHIFT_SIGNED,
+          A.RIGHT_SHIFT_UNSIGNED_ASSIGN -> I.RIGHT_SHIFT_UNSIGNED,
+          A.TIMES_ASSIGN -> I.TIMES)
+
+        val rhs = e.getOperator match {
+          case A.ASSIGN => genExprValue(e.getRightHandSide)
+          case other => genBinaryOperator(lhs, genExprValue(e.getRightHandSide),
+            opMap.apply(other))
+        }
+
         lhs match {
           case sel: js.ApplyStatic =>
             // If the LHS is a (qualified) name of a static field, genExpr
@@ -772,10 +791,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             genStaticSet(
               sel.method.name.simpleName.nameString,
               sel.className,
-              genExprValue(e.getRightHandSide),
+              rhs,
               sjsTypeRef(sel.tpe)
             )
-          case _ => js.Assign(lhs, genExprValue(e.getRightHandSide))
+          case _ => js.Assign(lhs, rhs)
         }
 
       case e: jdt.BooleanLiteral => js.BooleanLiteral(e.booleanValue())
@@ -801,7 +820,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
               "new", mi.paramTypes.map(sjsTypeRef), sjsTypeRef(mb.getDeclaringClass)
             ))
           else
-            js.MethodIdent(jsn.MethodName.constructor(mi.paramTypes.map(sjsTypeRef)))
+           mi.ident
         val tpe = jst.ClassType(className)
 
         if (isHijacked) {
@@ -830,6 +849,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         throw new JavaCompilationException("Method references aren't supported yet")
 
       case e: jdt.FieldAccess =>
+        // TODO: Outer scoping?
         genSelect(genExprValue(e.getExpression), e.resolveFieldBinding)
 
       case e: jdt.InfixExpression =>
@@ -861,7 +881,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case e: jdt.InstanceofExpression =>
         js.IsInstanceOf(
           genExprValue(e.getLeftOperand),
-          sjsType(e.getRightOperand.resolveBinding())
+          sjsType(e.getRightOperand.resolveBinding)
         )
 
       case e: jdt.LambdaExpression =>
@@ -915,11 +935,12 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
         // Keep the literal type. It shall be casted to the correct type at the
         // usage site.
+        val v = e.resolveConstantExpressionValue
         expectedType match {
-          case jst.DoubleType => js.DoubleLiteral(e.getToken.toDouble)
-          case jst.FloatType => js.FloatLiteral(e.getToken.toFloat)
-          case jst.IntType => js.IntLiteral(e.getToken.toInt)
-          case jst.LongType => js.LongLiteral(value.asInstanceOf[Long])
+          case jst.DoubleType => js.DoubleLiteral(v.asInstanceOf[Double])
+          case jst.FloatType => js.FloatLiteral(v.asInstanceOf[Float])
+          case jst.IntType => js.IntLiteral(v.asInstanceOf[Int])
+          case jst.LongType => js.LongLiteral(v.asInstanceOf[Long])
           case other =>
             throw new IllegalArgumentException(s"Cannot bind number literal ${e.getToken} to type ${other}")
         }
@@ -1053,7 +1074,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
               genStaticGet(vb.getName, thisClassName, tpe)
             }
             else if (vb.isField) {
-              println("SELECT", vb.getName, vb.getDeclaringClass.getBinaryName, outerClassNames)
               genSelect(
                 genOuterSelect(jsn.ClassName(vb.getDeclaringClass.getBinaryName)),
                 vb
@@ -1118,8 +1138,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           ))
         }
 
-      case e: jdt.TypeLiteral => ???
+      case e: jdt.TypeLiteral => js.ClassOf(sjsTypeRef(e.resolveTypeBinding))
+
       case e: jdt.TypeMethodReference => ???
+
       case e: jdt.VariableDeclarationExpression => ???
     }
   }
