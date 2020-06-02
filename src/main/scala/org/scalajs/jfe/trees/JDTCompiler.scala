@@ -333,9 +333,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     implicit val position: Position = getPosition(method)
 
     val mi = MethodInfo(method.resolveBinding)
-    val assignOuter =
-      if (mi.outerClassName.nonEmpty) List(genSetOuter())
-      else Nil
     val stats = method.getBody.statements.asScala[jdt.Statement]
     val (prelude, body) = stats match {
       case (_: jdt.ConstructorInvocation) :: _ =>
@@ -346,16 +343,24 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case (sci: jdt.SuperConstructorInvocation) :: rest =>
         // This constructor explicitly calls a super-constructor
         // Call super first, THEN initialize instance fields.
-        (genStatement(sci) :: genSetOuter() :: fieldDecls.flatMap(genFieldInitializers), rest)
+        (genSetOuter() :: genStatement(sci) :: fieldDecls.flatMap(genFieldInitializers), rest)
 
       case _ =>
         // This constructor does not delegate. Call the implicit super and
         // initialize instance fields.
         val ident = js.MethodIdent(jsn.MethodName.constructor(Nil))
-        val superInvocation = js.ApplyStatically(WithConstructorFlags,
-          thisNode, superClassName, ident, Nil)(jst.NoType)
+        val superMI = MethodInfo.defaultConstructor(topLevel.resolveBinding.getSuperclass)
+        val superInvocation = js.ApplyStatically(
+          WithConstructorFlags,
+          thisNode,
+          superMI.declaringClassName,
+          superMI.ident,
+          superMI.genArgsForConstructor(
+            mi.outerClassName.map(genOuterSelect), Nil
+          )
+        )(jst.NoType)
 
-        (superInvocation :: genSetOuter() :: fieldDecls.flatMap(genFieldInitializers), stats)
+        (genSetOuter() :: superInvocation :: fieldDecls.flatMap(genFieldInitializers), stats)
     }
 
     js.MethodDef(
@@ -571,21 +576,41 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       }
 
       case s: jdt.DoStatement =>
-        js.DoWhile(genStatement(s.getBody), genExprValue(s.getExpression))
+        withBreakScope(jst.NoType) {
+          js.DoWhile(
+            withContinueScope(jst.NoType) {
+              genStatement(s.getBody)
+            },
+            genExprValue(s.getExpression)
+          )
+        }
 
       case _: jdt.EmptyStatement =>
         js.Skip()
 
-      case s: jdt.EnhancedForStatement => js.ForIn(
-        genExprValue(s.getExpression),
-        js.LocalIdent(jsn.LocalName(s.getParameter.getName.getIdentifier)),
-        NoOriginalName,
-        genStatement(s.getBody)
-      )
+      case s: jdt.EnhancedForStatement => ???
+        // TODO: Test enhanced for
+        // ForIn makes variable typed to any? Need to store and cast?
+//        js.ForIn(
+//          genExprValue(s.getExpression),
+//          js.LocalIdent(jsn.LocalName(s.getParameter.getName.getIdentifier)),
+//          NoOriginalName,
+//          js.Block(
+//            js.VarDef(
+//              js.LocalIdent(jsn.LocalName(s.getParameter.getName.getIdentifier)),
+//              NoOriginalName,
+//              sjsType(s.getParameter.resolveBinding.getType),
+//              mutable = false,
+//
+//            ),
+//            genStatement(s.getBody)
+//          )
+//        )
 
       case s: jdt.ExpressionStatement => genExprStatement(s.getExpression)
 
       case s: jdt.ForStatement =>
+        // TODO: Create a new scope to hide name collisions
         js.Block(
           // Initializers
           s.initializers.asScala[jdt.Expression]
@@ -595,15 +620,14 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             withBreakScope(jst.NoType) {
               js.While(
                 genExprValue(s.getExpression),
-                withContinueScope(jst.NoType) {
-                  js.Block(
-                    List(genStatement(s.getBody)) ++
+                js.Block(
+                  withContinueScope(jst.NoType) {
+                    genStatement(s.getBody)
+                  } +:
 
-                      // Updaters
-                      s.updaters.asScala[jdt.Expression]
-                        .map(genExprStatement)
-                  )
-                }
+                    // Updaters
+                    s.updaters.asScala[jdt.Expression].map(genExprStatement)
+                )
               )
             }
         )
@@ -661,36 +685,39 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         genSwitch(s.getExpression, s.statements.asScala[jdt.Statement])
 
       case s: jdt.SynchronizedStatement =>
-        val body = genBlock(s.getBody)
-
         // Process the side-effect of the expression
         val expr = genExprValue(s.getExpression)
-        val seVarDef = js.VarDef(
-          js.LocalIdent(jsn.LocalName(freshName("sideEffect"))),
-          NoOriginalName, expr.tpe, mutable = false, expr)
-
-        // Check for nullity. This is a runtime thing that we must do to
-        // preserve semantics
         js.Block(
-          seVarDef,
+          js.VarDef(js.LocalIdent(jsn.LocalName(freshName("sideEffect"))),
+            NoOriginalName, expr.tpe, mutable = false, expr),
           js.If(
             js.BinaryOp(js.BinaryOp.===, expr, js.Null()),
             genThrowNPE,
-            body
+            genBlock(s.getBody)
           )(jst.NoType)
         )
 
-      case s: jdt.ThrowStatement => js.Throw(genExprValue(s.getExpression))
+      case s: jdt.ThrowStatement =>
+        val expr = genExprValue(s.getExpression)
+        js.Block(
+          js.VarDef(js.LocalIdent(jsn.LocalName(freshName("sideEffect"))),
+            NoOriginalName, expr.tpe, mutable = false, expr),
+          js.If(
+            js.BinaryOp(js.BinaryOp.===, expr, js.Null()),
+            genThrowNPE,
+            js.Throw(expr)
+          )(jst.NoType)
+        )
 
       case _: jdt.TryStatement => ???
 
-      case _: jdt.TypeDeclarationStatement => ???
+      case t: jdt.TypeDeclarationStatement => ???
 
       case s: jdt.VariableDeclarationStatement =>
         val tpe = sjsType(s.getType.resolveBinding)
 
         js.Block(
-          s.fragments.toArray.map(_.asInstanceOf[jdt.VariableDeclarationFragment])
+          s.fragments.asScala[jdt.VariableDeclarationFragment]
             .map { frag =>
               js.VarDef(
                 js.LocalIdent(jsn.LocalName(frag.getName.getIdentifier)),
@@ -700,11 +727,14 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
                 cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
               )
             }
-            .toList
         )
 
       case s: jdt.WhileStatement =>
-        js.While(genExprValue(s.getExpression), genStatement(s.getBody))
+        withBreakScope(jst.NoType) {
+          js.While(genExprValue(s.getExpression), withContinueScope(jst.NoType) {
+            genStatement(s.getBody)
+          })
+        }
 
       case y: jdt.YieldStatement => ???
     }
@@ -823,7 +853,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
               "new", mi.paramTypes.map(sjsTypeRef), sjsTypeRef(mb.getDeclaringClass)
             ))
           else
-           mi.ident
+            mi.ident
         val tpe = jst.ClassType(className)
 
         if (isHijacked) {
@@ -1141,11 +1171,27 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           ))
         }
 
-      case e: jdt.TypeLiteral => js.ClassOf(sjsTypeRef(e.resolveTypeBinding))
+      case e: jdt.TypeLiteral =>
+        js.ClassOf(sjsTypeRef(e.getType.resolveBinding))
 
       case e: jdt.TypeMethodReference => ???
 
-      case e: jdt.VariableDeclarationExpression => ???
+      case e: jdt.VariableDeclarationExpression =>
+        // TODO: Consolidate with VariableDeclarationStatement
+        val tpe = sjsType(e.getType.resolveBinding)
+        js.Block(
+          e.fragments.asScala[jdt.VariableDeclarationFragment]
+            .map { frag =>
+              js.VarDef(
+                js.LocalIdent(jsn.LocalName(frag.getName.getIdentifier)),
+                NoOriginalName,
+                tpe,
+                mutable = !jdt.Modifier.isFinal(e.getModifiers),
+                cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
+              )
+            }
+        )
+
     }
   }
 

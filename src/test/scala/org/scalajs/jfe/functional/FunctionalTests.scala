@@ -8,6 +8,7 @@ import org.scalatest.funspec.AnyFunSpec
 case class NumericTestType(name: String, max: AnyVal)
 
 class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
+
   import org.scalajs.jfe.TestUtils._
 
   val NumericTestTypes = Set(
@@ -140,8 +141,85 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       }
 
       it("handles simple for loops") {
-
+        val src =
+          """class Main {
+            |    public static void main() {
+            |        for (int i = 0; i < 10; i++) {
+            |            System.out.println(i);
+            |        }
+            |    }
+            |}""".stripMargin
+        assertRun(src, Seq(0, 1, 2, 3, 4, 5, 6, 7, 8, 9))
       }
+
+      it("breaks and continues for loops") {
+        val src =
+          """class Main {
+            |    public static void main() {
+            |        for (int i = 0; i < 10; i++) {
+            |            if (i % 2 == 0) continue;
+            |            if (i > 6) break;
+            |            System.out.println(i);
+            |        }
+            |    }
+            |}""".stripMargin
+        assertRun(src, Seq(1, 3, 5))
+      }
+
+      it("supports do-while") {
+        val src =
+          """class Main {
+            |    public static void main() {
+            |        do {
+            |            System.out.println("a");
+            |        } while (false);
+            |        int i = 0;
+            |        do {
+            |            System.out.println(i++);
+            |        } while (i < 5);
+            |    }
+            |}""".stripMargin
+        assertRun(src, Seq("a", 0, 1, 2, 3, 4))
+      }
+
+      it("breaks and continues do-while") {
+        val src =
+          """class Main {
+            |    public static void main() {
+            |        int i = 0;
+            |        do {
+            |            i++;
+            |            if (i % 2 == 0) continue;
+            |            if (i > 10) break;
+            |            System.out.println(i);
+            |        } while (i < 20);
+            |    }
+            |}""".stripMargin
+        assertRun(src, Seq(1, 3, 5, 7, 9))
+      }
+
+      //      it("supports enhanced for loops") {
+      //        val src =
+      //          """class Main {
+      //            |    public static void main() {
+      //            |        int[] arr = { 1, 2, 3, 4, 5 };
+      //            |        for (int x : arr) {
+      //            |            //System.out.println(x);
+      //            |        }
+      //            |    }
+      //            |}""".stripMargin
+      //        assertRun(src, Seq(1, 2, 3, 4, 5))
+      //      }
+
+      //      it("supports throwing exceptions") {
+      //        val src =
+      //          """class Main {
+      //            |    public static void main() {
+      //            |        throw new Exception("foo");
+      //            |    }
+      //            |}""".stripMargin
+      //        assertRun(src, "bar")
+      //      }
     }
 
     it("handles literals") {
@@ -157,6 +235,35 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    }
           |}""".stripMargin
       assertRun(src, Seq(10, 11, 12.5, 13.5, true, '@'))
+    }
+
+    it("initializes variables with their zero value") {
+      val src =
+        """class Main {
+          |    static boolean bool;
+          |    static char c;
+          |    static byte b;
+          |    static short s;
+          |    static int i;
+          |    static long l;
+          |    static float f;
+          |    static double d;
+          |    static Object o;
+          |    static String str;
+          |    public static void main() {
+          |        System.out.println(bool);
+          |        System.out.println(c);
+          |        System.out.println(b);
+          |        System.out.println(s);
+          |        System.out.println(i);
+          |        System.out.println(l);
+          |        System.out.println(f);
+          |        System.out.println(d);
+          |        System.out.println(o);
+          |        System.out.println(str);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq(false, "\u0000", 0, 0, 0, 0, 0, 0, "null", "null"))
     }
 
     it("does math") {
@@ -495,6 +602,26 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    }
           |}""".stripMargin
       assertRun(src, Seq(40, 40, 20, 20));
+    }
+
+    it("supports type literals (.class)") {
+      val src =
+        """class Main{
+          |    public static void main() {
+          |        System.out.println(void.class);
+          |        System.out.println(int.class);
+          |        System.out.println(String.class);
+          |        Class c1 = String.class;
+          |        Class<String> c2 = String.class;
+          |        Class<? extends Number> c3 = Integer.class;
+          |        System.out.println(c1);
+          |        System.out.println(c2);
+          |        System.out.println(c3);
+          |    }
+          |}""".stripMargin
+      assertRun(src, Seq("void", "int",
+        "class java.lang.String", "class java.lang.String",
+        "class java.lang.String", "class java.lang.Integer"))
     }
   }
 
@@ -1024,7 +1151,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
       assertRun(src, Seq("Inner", "Main"))
     }
 
-    it("passes outer scope through to constructors") {
+    it("passes outer scope through through implicit constructors") {
       val src =
         """class Main {
           |    int a = 10;
@@ -1039,6 +1166,52 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |    public static void main() { new Main(); }
           |}""".stripMargin
       assertRun(src, Seq(10, 20))
+    }
+
+    it("passes outer scope through through explicit constructors") {
+      val src =
+        """class Main {
+          |    int a = 10;
+          |    int b = 20;
+          |    class A {
+          |        public A() { System.out.println("construct A"); }
+          |        void printA() { System.out.println(a); }
+          |    }
+          |    class B extends A {
+          |        public B() { System.out.println("construct B"); }
+          |        void printB() { System.out.println(b); }
+          |    }
+          |    public Main() {
+          |        B b = new B();
+          |        b.printA();
+          |        b.printB();
+          |    }
+          |    public static void main() { new Main(); }
+          |}""".stripMargin
+      assertRun(src, Seq("construct A", "construct B", 10, 20))
+    }
+
+    it("passes outer scope through through explicit constructors with params") {
+      val src =
+        """class Main {
+          |    int a = 10;
+          |    int b = 20;
+          |    class A {
+          |        public A(String s) { System.out.println(s); }
+          |        void printA() { System.out.println(a); }
+          |    }
+          |    class B extends A {
+          |        public B(String s) { super("construct A"); System.out.println(s); }
+          |        void printB() { System.out.println(b); }
+          |    }
+          |    public Main() {
+          |        B b = new B("construct B");
+          |        b.printA();
+          |        b.printB();
+          |    }
+          |    public static void main() { new Main(); }
+          |}""".stripMargin
+      assertRun(src, Seq("construct A", "construct B", 10, 20))
     }
   }
 
