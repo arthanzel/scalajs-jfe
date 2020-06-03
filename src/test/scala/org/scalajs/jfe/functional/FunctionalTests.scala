@@ -1213,6 +1213,30 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |}""".stripMargin
       assertRun(src, Seq("construct A", "construct B", 10, 20))
     }
+
+    it("passes outer scope through through explicit co-constructors with params") {
+      val src =
+        """class Main {
+          |    int a = 10;
+          |    int b = 20;
+          |    class A {
+          |        public A(String s) { System.out.println(s); }
+          |        void printA() { System.out.println(a); }
+          |    }
+          |    class B extends A {
+          |        public B() { super("construct A"); }
+          |        public B(String s) { this(); System.out.println(s); }
+          |        void printB() { System.out.println(b); }
+          |    }
+          |    public Main() {
+          |        B b = new B("construct B");
+          |        b.printA();
+          |        b.printB();
+          |    }
+          |    public static void main() { new Main(); }
+          |}""".stripMargin
+      assertRun(src, Seq("construct A", "construct B", 10, 20))
+    }
   }
 
   describe("Generics") {
@@ -1323,5 +1347,25 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
           |}""".stripMargin
       assertRun(src, Seq(1, 2, 3, 2))
     }
+  }
+
+  it("sandbox") {
+    val src =
+      """class Main {
+        |    public static void main() {
+        |        for (int i = 0; i < 4; i++) {
+        |            switch (i % 2) {
+        |                case 0:
+        |                    System.out.println("even");
+        |                    break;
+        |                case 1:
+        |                    System.out.println("odd");
+        |                default:
+        |                    System.out.println("fallthrough");
+        |            }
+        |        }
+        |    }
+        |}""".stripMargin
+    assertRun(src, Seq("even", "odd", "fallthrough", "even", "odd", "fallthrough"))
   }
 }

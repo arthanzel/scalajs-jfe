@@ -75,8 +75,6 @@ object TypeUtils {
       js.MemberNamespace.PublicStatic
     else
       js.MemberNamespace.Public
-
-    // TODO: Protected scope?
   }
 
   def nsAccess(m: Int): js.MemberNamespace = {

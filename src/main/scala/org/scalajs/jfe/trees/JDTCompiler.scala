@@ -329,6 +329,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
                      fieldDecls: List[jdt.FieldDeclaration]): js.MethodDef = {
     // TODO: Place field initializers in their own method if there are multiple
     //  top-level constructors
+    // TODO: Call static initializer
 
     implicit val position: Position = getPosition(method)
 
@@ -338,17 +339,16 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case (_: jdt.ConstructorInvocation) :: _ =>
         // This constructor calls a co-constructor; it is not a top-level
         // Do not add any synthetic code
-        (Nil, stats)
+        (genSetOuter :: Nil, stats)
 
       case (sci: jdt.SuperConstructorInvocation) :: rest =>
         // This constructor explicitly calls a super-constructor
         // Call super first, THEN initialize instance fields.
-        (genSetOuter() :: genStatement(sci) :: fieldDecls.flatMap(genFieldInitializers), rest)
+        (genSetOuter :: genStatement(sci) :: fieldDecls.flatMap(genFieldInitializers), rest)
 
       case _ =>
         // This constructor does not delegate. Call the implicit super and
         // initialize instance fields.
-        val ident = js.MethodIdent(jsn.MethodName.constructor(Nil))
         val superMI = MethodInfo.defaultConstructor(topLevel.resolveBinding.getSuperclass)
         val superInvocation = js.ApplyStatically(
           WithConstructorFlags,
@@ -360,7 +360,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           )
         )(jst.NoType)
 
-        (genSetOuter() :: superInvocation :: fieldDecls.flatMap(genFieldInitializers), stats)
+        (genSetOuter :: superInvocation :: fieldDecls.flatMap(genFieldInitializers), stats)
     }
 
     js.MethodDef(
@@ -500,6 +500,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       throw new JavaCompilationException("genMethod shouldn't be passed a constructor")
     }
 
+    // TODO: Call static initializer when calling a static method
+
     val mi = MethodInfo(method.resolveBinding)
     val returnType = mi.returnType
 
@@ -531,7 +533,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     implicit val position: Position = getPosition(statement)
 
     statement match {
-      case s: jdt.AssertStatement => ???
+      case s: jdt.AssertStatement => js.Skip()
+      // TODO: If assertions are enabled, check condition and raise AssertionError
 
       case s: jdt.Block =>
         genBlock(s)
@@ -589,23 +592,23 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         js.Skip()
 
       case s: jdt.EnhancedForStatement => ???
-        // TODO: Test enhanced for
-        // ForIn makes variable typed to any? Need to store and cast?
-//        js.ForIn(
-//          genExprValue(s.getExpression),
-//          js.LocalIdent(jsn.LocalName(s.getParameter.getName.getIdentifier)),
-//          NoOriginalName,
-//          js.Block(
-//            js.VarDef(
-//              js.LocalIdent(jsn.LocalName(s.getParameter.getName.getIdentifier)),
-//              NoOriginalName,
-//              sjsType(s.getParameter.resolveBinding.getType),
-//              mutable = false,
-//
-//            ),
-//            genStatement(s.getBody)
-//          )
-//        )
+      // TODO: Test enhanced for
+      // ForIn makes variable typed to any? Need to store and cast?
+      //        js.ForIn(
+      //          genExprValue(s.getExpression),
+      //          js.LocalIdent(jsn.LocalName(s.getParameter.getName.getIdentifier)),
+      //          NoOriginalName,
+      //          js.Block(
+      //            js.VarDef(
+      //              js.LocalIdent(jsn.LocalName(s.getParameter.getName.getIdentifier)),
+      //              NoOriginalName,
+      //              sjsType(s.getParameter.resolveBinding.getType),
+      //              mutable = false,
+      //
+      //            ),
+      //            genStatement(s.getBody)
+      //          )
+      //        )
 
       case s: jdt.ExpressionStatement => genExprStatement(s.getExpression)
 
@@ -882,10 +885,12 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         throw new JavaCompilationException("Method references aren't supported yet")
 
       case e: jdt.FieldAccess =>
-        // TODO: Outer scoping?
+        // TODO: Outer scoping with Outer.this.field on FieldAccess
         genSelect(genExprValue(e.getExpression), e.resolveFieldBinding)
 
       case e: jdt.InfixExpression =>
+        import jdt.InfixExpression.Operator._
+
         val lhs = genExprValue(e.getLeftOperand)
         val rhs = genExprValue(e.getRightOperand)
 
@@ -896,7 +901,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           else List(rhs)
 
         rights.foldLeft(lhs) { case (lhs, rhs) =>
-          if (isStringy(lhs)) {
+          if (isStringy(lhs) && e.getOperator == PLUS) {
             // String concatenation
             js.BinaryOp(
               js.BinaryOp.String_+,
@@ -905,7 +910,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             )
           }
           else {
-            // TODO: Shift ops
             // Arithmetic or logical op
             genBinaryOperator(lhs, rhs, e.getOperator)
           }
@@ -917,7 +921,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           sjsType(e.getRightOperand.resolveBinding)
         )
 
-      case e: jdt.LambdaExpression =>
+      case _: jdt.LambdaExpression =>
         // TODO: implement lambdas
         throw new JavaCompilationException("Lambdas aren't supported yet")
 
@@ -934,18 +938,14 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             // Instance call
             val receiver = Option(e.getExpression) match {
               case None =>
-                if (mi.declaringClassName.equals(thisClassName)) {
-                  // Implicit `this` receiver
-                  js.This()(thisClassType)
-                }
-                else if (outerClassNames.contains(mi.declaringClassName)) {
+                if (outerClassNames.contains(mi.declaringClassName)) {
                   // Method is defined in an enclosing type
                   // Select the chain of outers as the receiver
                   genOuterSelect(mi.declaringClassName)
                 }
                 else {
-                  // Implicit superclass receiver
-                  js.This()(jst.ClassType(mi.declaringClassName))
+                  // Implicit this receiver and method is not overridden
+                  thisNode
                 }
               case Some(expr) =>
                 // Receiver is specified
@@ -1004,20 +1004,11 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         if (returningValue) {
           val tempVar = js.LocalIdent(jsn.LocalName(TextUtils.freshName("temp")))
 
+          // Store the current value locally, do the operator, return original
+          // value
           js.Block(
-            // Store the current value locally
-            js.VarDef(
-              tempVar,
-              NoOriginalName,
-              expr.tpe,
-              mutable = false,
-              expr
-            ),
-
-            // Do the operator
+            js.VarDef(tempVar, NoOriginalName, expr.tpe, mutable = false, expr),
             assignment,
-
-            // Return the original value
             js.VarRef(tempVar)(expr.tpe)
           )
         }
@@ -1136,30 +1127,18 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         )(sjsType(e.resolveFieldBinding.getType))
 
       case e: jdt.SuperMethodInvocation =>
-        val mb = e.resolveMethodBinding
-
-        val paramTypes = mb.getParameterTypes.map(sjsType)
-        val ident = js.MethodIdent(jsn.MethodName(
-          e.getName.getIdentifier,
-          paramTypes.map(sjsTypeRef).toList,
-          sjsTypeRef(mb.getReturnType)
-        ))
-        val args = e.arguments().asScala[jdt.Expression]
-          .map(genExprValue(_))
-          .zip(paramTypes)
-          .map { case (arg, tpe) => cast(arg, tpe) }
-        val tpe = sjsType(mb.getReturnType)
+        val mi = MethodInfo(e.resolveMethodBinding)
+        val args = mi.genArgs(e.arguments.asScala[jdt.Expression]
+          .map(genExprValue(_)))
 
         // TODO: ApplyFlags for SuperMethodInvocation
-        js.ApplyStatically(
-          js.ApplyFlags.empty,
-          thisNode,
-          jsn.ClassName(mb.getDeclaringClass.getBinaryName),
-          ident,
-          args
-        )(tpe)
+        staticCast(
+          js.ApplyStatically(js.ApplyFlags.empty, thisNode,
+            mi.declaringClassName, mi.ident, args)(mi.returnType),
+          mi.invocationReturnType
+        )
 
-      case e: jdt.SwitchExpression => ???
+      case _: jdt.SwitchExpression => ???
 
       case e: jdt.ThisExpression =>
         if (e.getQualifier == null) {
@@ -1191,7 +1170,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
               )
             }
         )
-
     }
   }
 
@@ -1201,7 +1179,10 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     import jdt.InfixExpression.Operator._
     import org.scalajs.ir.Trees.BinaryOp._
 
-    val outType = getBinaryOpResultType(lhsIn.tpe, rhsIn.tpe)
+    val outType = getBinaryOpResultType(
+      tryUnbox(lhsIn).getOrElse(lhsIn).tpe,
+      tryUnbox(rhsIn).getOrElse(rhsIn).tpe
+    )
     val lhs = cast(lhsIn, outType)
     val rhs = cast(rhsIn, if (isShift(jdtOp)) jst.IntType else outType)
 
@@ -1437,7 +1418,33 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     // TODO: Emit a Match node if all cases in a switch terminate
     //   You'll need to remove breaks if they are the last stat in a case.
     withBreakScope(jst.NoType) {
-      val cases = splitCases(statements)
+      // Construct an if block for every case
+      // This needs to be inside the withBreakScope
+      val caseIfs = splitCases(statements).map { caseBlock =>
+        val caseCondition =
+          if (caseBlock.isDefault) js.BooleanLiteral(value = true)
+          else
+            caseBlock.expr.map { expr =>
+              genBinaryOperator(
+                js.VarRef(exprIdent)(exprType),
+                expr,
+                jdt.InfixExpression.Operator.EQUALS
+              )
+            }.reduce { (acc, equality) =>
+              js.BinaryOp(js.BinaryOp.Boolean_|, acc, equality)
+            }
+
+        js.If(
+          js.BinaryOp(
+            js.BinaryOp.Boolean_|,
+            js.VarRef(fallthroughIdent)(jst.BooleanType),
+            caseCondition
+          ),
+          caseBlock.body,
+          js.Skip()
+        )(jst.NoType)
+      }
+
       js.Block(
         // Expression local
         js.VarDef(exprIdent, NoOriginalName, exprType,
@@ -1447,17 +1454,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         js.VarDef(fallthroughIdent, NoOriginalName, jst.BooleanType,
           mutable = true, js.BooleanLiteral(value = false)),
 
-        cases.foldRight[js.Tree](js.Skip()) { (caseBlock, acc) =>
-          js.If(
-            js.BinaryOp(
-              js.BinaryOp.Boolean_|,
-              js.VarRef(fallthroughIdent)(jst.BooleanType),
-              js.BooleanLiteral(value = true) /* TODO: Create equality */
-            ),
-            caseBlock.body,
-            acc
-          )(jst.NoType)
-        }
+        js.Block(caseIfs)
       )
     }
   }
