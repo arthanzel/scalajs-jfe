@@ -7,21 +7,27 @@ object Main extends App {
 //  println("=== Java AST ===")
 //  println(javaAST)
 
+  val scala =
+    """class Main {
+      |    try {
+      |      println("foo");
+      |    } catch {
+      |      case _: IllegalArgumentException => println("nie")
+      |      case _ => println("other")
+      |    } finally {
+      |      println("finally")
+      |    }
+      |}
+      |""".stripMargin
+  val scalaIR = ASTUtils.compileString(scala)
+  ASTUtils.compileString(scala).foreach(ASTUtils.printAST)
+
   val sourceCode =
     """
-      |class Main {
-      |    static void log(String s) {System.out.println(s);}
-      |    static void main() {
-      |    int i = 4;
-      |        switch (i % 2) {
-      |  case 0:
-      |    log("even");
-      |    break;
-      |  case 1:
-      |    log("odd");
-      |  default:
-      |    log("fallthrough");
-      |}
+      |class Base {
+      |    public void test() {
+      |        int i = 0;
+      |        int s = i++;
       |    }
       |}
       |""".stripMargin

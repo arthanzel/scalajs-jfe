@@ -12,6 +12,7 @@ object MethodInfo {
       override def declaringClassName: jsn.ClassName =
         jsn.ClassName(mb.getDeclaringClass.getBinaryName)
       override def isConstructor: Boolean = mb.isConstructor
+      override def isPrivate: Boolean = jdt.Modifier.isPrivate(mb.getModifiers)
       override def isStatic: Boolean =
         jdt.Modifier.isStatic(mb.getModifiers)
       override def declaredParamTypes: List[jst.Type] =
@@ -32,6 +33,7 @@ object MethodInfo {
       override def declaringClassName: jsn.ClassName =
         jsn.ClassName(jdtType.getBinaryName)
       override def isConstructor = true
+      override def isPrivate = false
       override def isStatic: Boolean = false
       override def declaredParamTypes: List[jst.Type] = Nil
       override def name: String = ""
@@ -55,6 +57,8 @@ trait MethodInfo {
   def declaringClassName: jsn.ClassName
 
   def isConstructor: Boolean
+
+  def isPrivate: Boolean
 
   /**
    * Whether this method was declared with the `static` modifier.

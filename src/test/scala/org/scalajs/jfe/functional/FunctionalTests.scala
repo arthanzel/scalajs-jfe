@@ -1349,7 +1349,7 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
     }
   }
 
-  it("sandbox") {
+  it("support switch statements") {
     val src =
       """class Main {
         |    public static void main() {
@@ -1368,4 +1368,80 @@ class FunctionalTests extends AnyFunSpec with BeforeAndAfter {
         |}""".stripMargin
     assertRun(src, Seq("even", "odd", "fallthrough", "even", "odd", "fallthrough"))
   }
+
+  it("supports array length") {
+    val src =
+      """class Main {
+        |    static int[] one = new int[1];
+        |    int[] two = new int[2];
+        |    static int[] many(int len) { return new int[999]; }
+        |    public static void main() {
+        |        int[] zero = new int[0];
+        |        int[] looped = new int[] { 0, 1, 2, 3, 4, 5 };
+        |        System.out.println(zero.length);
+        |        System.out.println(one.length);
+        |        System.out.println(new Main().two.length);
+        |        System.out.println(many(999).length);
+        |        for (int i = 0; i < looped.length; i++) {
+        |            System.out.println(looped[i]);
+        |        }
+        |    }
+        |}""".stripMargin
+    assertRun(src, Seq(0, 1, 2, 999, 0, 1, 2, 3, 4, 5))
+  }
+
+  it("breaks out of named for loops") {
+    val src =
+      """class Main {
+        |    public static void main() {
+        |        OUTER: for (int i = 0; true; i++) {
+        |            for (int j = 0; true; j++) {
+        |                System.out.println(j);
+        |                if (i == 3) break OUTER;
+        |                if (j == 3) continue OUTER;
+        |            }
+        |        }
+        |    }
+        |}""".stripMargin
+    assertRun(src, Seq(0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0))
+  }
+
+  it("executes static initializers and constructors in the right order") {
+    val src =
+      """class Base {
+        |    static { System.out.println("Base static"); }
+        |    public Base() { System.out.println("Base init"); }
+        |}
+        |class Sub extends Base {
+        |    static { System.out.println("Sub static"); }
+        |    public Sub() { System.out.println("Sub init"); }
+        |}
+        |class Main {
+        |    public static void main() {
+        |        new Sub();
+        |    }
+        |}""".stripMargin
+    assertRun(src, Seq("Base static", "Base init", "Sub static", "Sub init"))
+  }
+
+//  it("sandbox") {
+//    val src =
+//      """
+//        |class Base {
+//        |    static { System.out.println("Base static"); }
+//        |}
+//        |class Sub extends Base {
+//        |    static { System.out.println("Sub static"); }
+//        |}
+//        |class Main {
+//        |    public static void main() {
+//        |        new Sub();
+//        |    }
+//        |}
+//        |""".stripMargin
+//    assertRun(src, Seq("SJS-JFE says:", "Hello", "Scala.js"))
+//  }
+
+  // TODO: infix ogical condition short-circuiting. Is left-fold correct?
+  // TODO: Test NPEs in selects
 }

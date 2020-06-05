@@ -45,8 +45,8 @@ object Runner {
     val config = StandardConfig().withCheckIR(true).withOptimizer(false)
     val linker = StandardImpl.linker(config)
 
-    val output = Jimfs.newFileSystem().getPath("output.js")
-//    val output = new java.io.File("output.js").toPath
+//    val output = Jimfs.newFileSystem().getPath("output.js")
+    val output = new java.io.File("output.js").toPath
     val future = linker.link(allIRFiles,
       List(ModuleInitializer.mainMethod(mainClass, "main")),
       LinkerOutput(PathOutputFile(output)), logger)

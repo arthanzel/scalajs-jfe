@@ -10,7 +10,7 @@ object TypeUtils {
     "java.lang.Integer", "java.lang.Long", "java.lang.Float",
     "java.lang.Double", "java.lang.String")
   val JDKObjectType: jst.ClassType = jst.ClassType(jsn.ClassName("java.lang.Object"))
-  val JDKStringType: jst.ClassType = jst.ClassType(jsn.ClassName("java.util.String"))
+  val JDKStringType: jst.ClassType = jst.ClassType(jsn.ClassName("java.lang.String"))
   val JDKStringRef: jst.TypeRef = sjsTypeRef(JDKStringType)
 
   def isStringy(tree: js.Tree): Boolean = tree.tpe == JDKStringType || tree.tpe == jst.StringType
@@ -62,19 +62,28 @@ object TypeUtils {
       !jdt.Modifier.isFinal(vb.getModifiers) && !vb.isEffectivelyFinal
     }
 
-  def memberNamespace(m: Int): js.MemberNamespace = {
+  def fieldNamespace(m: Int): js.MemberNamespace = {
     import jdt.Modifier
 
     // TODO: Support private methods? JDT already does access checking and private/public are just namespacing details in SJSIR
 
-    if (Modifier.isPublic(m) && Modifier.isStatic(m))
-      js.MemberNamespace.PublicStatic
-    else if (Modifier.isPublic(m))
-      js.MemberNamespace.Public
-    else if (Modifier.isStatic(m))
+    if (Modifier.isStatic(m))
       js.MemberNamespace.PublicStatic
     else
       js.MemberNamespace.Public
+  }
+
+  def methodNamespace(m: Int): js.MemberNamespace = {
+    import jdt.Modifier
+
+    if (!Modifier.isPrivate(m) && Modifier.isStatic(m))
+      js.MemberNamespace.PublicStatic
+    else if (!Modifier.isPrivate(m))
+      js.MemberNamespace.Public
+    else if (Modifier.isStatic(m))
+      js.MemberNamespace.PrivateStatic
+    else
+      js.MemberNamespace.Private
   }
 
   def nsAccess(m: Int): js.MemberNamespace = {
