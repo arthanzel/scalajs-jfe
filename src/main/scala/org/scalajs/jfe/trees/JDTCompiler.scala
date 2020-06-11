@@ -5,7 +5,10 @@ import org.eclipse.jdt.core.{dom => jdt}
 import org.scalajs.ir.Trees.OptimizerHints
 import org.scalajs.ir.{ClassKind, OriginalName, Position, Names => jsn, Trees => js, Types => jst}
 import org.scalajs.jfe.JavaCompilationException
+import org.scalajs.jfe.trees.TreesSupport.{FieldInfo, InitializerInfo}
 import org.scalajs.jfe.util.TextUtils
+
+import scala.collection.mutable
 
 object JDTCompiler {
 
@@ -161,12 +164,12 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
     // Preprocess members to make internal counters consistent
     val sjsFieldDefs = cls.getFields.flatMap(genFields)
-    val sjsStaticFieldDefs = sjsFieldDefs.filter(_.flags.namespace.isStatic)
+    val sjsInstanceFieldDefs = sjsFieldDefs.filter(!_.flags.namespace.isStatic)
     val sjsMethods = cls.getMethods.filter(!_.isConstructor).map(genMethod)
-    hasStatics = sjsStaticFieldDefs.nonEmpty ||
-      cls.bodyDeclarations.asScala[jdt.BodyDeclaration].exists { decl =>
-      decl.isInstanceOf[jdt.Initializer] && jdt.Modifier.isStatic(decl.getModifiers)
-    }
+
+    // Generate static fields, accessors, and initializers
+    val staticSupport = genStaticSupport(cls)
+    this.hasStatics = staticSupport.nonEmpty
 
     // Generate constructors, or make the default one
     val ctors =
@@ -183,24 +186,13 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       else
         None
 
-    // Generate static accessors and initializers
-    val staticSynthetics: Seq[js.MemberDef] =
-      if (hasStatics) {
-        // Static fields have synthetic getters and setters, so we can hook onto
-        // them and statically initialize the class when needed.
-        // SJS doesn't do automatic static initialization like Java does.
-        val accessors = sjsStaticFieldDefs.flatMap(f => genStaticAccessors(f))
-
-        accessors ++ genStaticInitializer(cls)
-      }
-      else Nil
-
     val body: Seq[js.MemberDef] =
-      sjsFieldDefs ++
+      Nil ++ // Guard, for convenient formatting
         outerFieldSynthetic ++
-        staticSynthetics ++
-        sjsMethods ++
-        ctors
+        sjsInstanceFieldDefs ++
+        staticSupport ++
+        ctors ++
+        sjsMethods
 
     // Generate class def
     val classDef = js.ClassDef(
@@ -225,6 +217,148 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       }
 
     classDef +: innerTypes
+  }
+
+  /**
+   * Generates field definitions and supporting synthetics for static fields
+   * and initializers.
+   *
+   * This one, big method encapsulates all logic for treating static field s
+   * and initializers.
+   */
+  def genStaticSupport(cls: jdt.AbstractTypeDeclaration): List[js.MemberDef] = {
+    val inits = mutable.ListBuffer[js.Tree]()
+
+    /**
+     * Given a declaration for one variable, generates a FieldDef along with
+     * synthetic getters and setters.
+     */
+    def genField(f: jdt.VariableDeclarationFragment): List[js.MemberDef] = {
+      val vb = f.resolveBinding
+      val tpe = sjsType(vb.getType)
+      val typeRef = sjsTypeRef(tpe)
+      implicit val pos: Position = getPosition(f)
+
+      // TODO: Static final fields shouldn't trigger initialization, but
+      //  initialization does trigger final field initialization
+
+      // The field definition
+      // TODO: private static for fields?
+      val flags = js.MemberFlags.empty
+        .withNamespace(js.MemberNamespace.PublicStatic)
+      val name = f.getName.getIdentifier
+      val fieldIdent = js.FieldIdent(jsn.FieldName(name))
+      val fieldDef = js.FieldDef(flags.withMutable(true), fieldIdent,
+        NoOriginalName, tpe)
+
+      // Call to the static initializer method
+      val callInit = js.ApplyStatic(js.ApplyFlags.empty, thisClassName,
+            staticInitializerIdent, Nil)(jst.NoType)
+
+      // The getter
+      // TODO: Inline the getter?
+      val getterIdent = js.MethodIdent(jsn.MethodName(name, Nil, typeRef))
+      val getter = js.MethodDef(
+        flags, getterIdent, NoOriginalName, Nil, tpe,
+        Some(js.Block(
+          callInit,
+          js.SelectStatic(thisClassName, fieldIdent)(tpe)
+        ))
+      )(NoOptimizerHints, None)
+
+      // The setter
+      // TODO: Inline the setter?
+      val setterName = s"${name}_$$eq"
+      val setterIdent = js.MethodIdent(jsn.MethodName(setterName, List(typeRef),
+        jst.VoidRef))
+      val paramIdent = js.LocalIdent(jsn.LocalName("value"))
+      val param = js.ParamDef(paramIdent, NoOriginalName, tpe, mutable = false,
+        rest = false)
+      val setter = js.MethodDef(
+        flags, setterIdent, NoOriginalName, List(param), jst.NoType,
+        Some(js.Block(
+          callInit,
+          js.Assign(
+            js.SelectStatic(thisClassName, fieldIdent)(tpe),
+            js.VarRef(paramIdent)(tpe)
+          )
+        ))
+      )(NoOptimizerHints, None)
+
+      // The initializer, which is put in a synthetic method later
+      if (f.getInitializer != null) inits += js.Assign(
+        js.SelectStatic(thisClassName, fieldIdent)(tpe),
+        cast(genExprValue(f.getInitializer), tpe)
+      )
+
+      List(fieldDef, getter, setter)
+    }
+
+    /**
+     * Generates a synthetic method that statically initializes the class.
+     *
+     * @param inits List of statements to run during initialization, including
+     *              assignments to static fields.
+     */
+    def genStaticInitializer(inits: List[js.Tree]): List[js.MemberDef] = {
+      // TODO: private static initializer?
+      implicit val pos: Position = NoPosition
+      val initializedFlag = js.FieldDef(
+        js.MemberFlags.empty.withMutable(true)
+          .withNamespace(js.MemberNamespace.PublicStatic),
+        js.FieldIdent(jsn.FieldName("$sjsirStaticCalled")),
+        NoOriginalName,
+        jst.BooleanType
+      )
+      val initializer = js.MethodDef(
+        js.MemberFlags.empty.withNamespace(js.MemberNamespace.PublicStatic),
+        staticInitializerIdent, NoOriginalName, Nil, jst.NoType,
+        Some(
+          js.If(
+            js.UnaryOp( // !$sjsirStaticCalled
+              js.UnaryOp.Boolean_!,
+              js.SelectStatic(thisClassName, initializedFlag.name)(jst.BooleanType),
+            ),
+            js.Block( // Then
+              js.Assign(
+                js.SelectStatic(thisClassName, initializedFlag.name)(jst.BooleanType),
+                js.BooleanLiteral(value = true)
+              ),
+              js.Block(inits.toList)
+            ),
+            js.Skip() // Else
+          )(jst.NoType)
+        )
+      )(NoOptimizerHints, None)(NoPosition)
+
+      List(initializedFlag, initializer)
+    }
+
+    /*
+    We need to go through all the body declarations in order instead of treating
+    fields and initializers separately, because field initializers and static
+    initializers are evaluated in lexical order.
+     */
+    val staticFieldsOrInitializers = cls.bodyDeclarations.asScala[jdt.BodyDeclaration]
+      .filter(x => jdt.Modifier.isStatic(x.getModifiers))
+      .collect {
+        case x: jdt.FieldDeclaration => x
+        case x: jdt.Initializer => x
+      }
+
+    // No static fields or initializers. Do not emit synthetic supports
+    if (staticFieldsOrInitializers.isEmpty) return Nil
+
+    // Generate static fields and their accessors
+    val members = staticFieldsOrInitializers.flatMap {
+      case field: jdt.FieldDeclaration =>
+        field.fragments.asScala[jdt.VariableDeclarationFragment].flatMap(genField)
+      case init: jdt.Initializer =>
+        inits += genBlock(init.getBody)
+        Nil
+    }
+
+    members ::: genStaticInitializer(inits.toList)
   }
 
   /**
@@ -352,7 +486,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     val stats = method.getBody.statements.asScala[jdt.Statement]
     val staticInitCall =
       if (hasStatics) js.ApplyStatic(js.ApplyFlags.empty, thisClassName,
-      staticInitializerIdent, Nil)(jst.NoType)
+        staticInitializerIdent, Nil)(jst.NoType)
       else js.Skip()
     val preludeAll = List(genSetOuter())
     val (prelude, body) = stats match {
@@ -414,105 +548,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
     field.fragments.asScala[jdt.VariableDeclarationFragment]
       .map(genFragment)
-  }
-
-  def genStaticAccessors(fieldDef: js.FieldDef): Seq[js.MemberDef] = {
-    implicit val pos: Position = fieldDef.pos
-
-    if (!fieldDef.flags.namespace.isStatic) Seq(fieldDef)
-    else {
-      val flags = js.MemberFlags.empty.withNamespace(fieldDef.flags.namespace)
-      val typeRef = sjsTypeRef(fieldDef.ftpe)
-      val valueIdent = js.LocalIdent(jsn.LocalName("value"))
-      val select = js.SelectStatic(thisClassName, fieldDef.name)(fieldDef.ftpe)
-
-      def withInitializerCall(tree: js.Tree): js.Tree = js.Block(
-        js.ApplyStatic(js.ApplyFlags.empty, thisClassName, staticInitializerIdent, Nil)(jst.NoType),
-        tree
-      )
-
-      val getterIdent = js.MethodIdent(jsn.MethodName(nameString(fieldDef), Nil,
-        typeRef))
-      val setterIdent = js.MethodIdent(jsn.MethodName(
-        s"${nameString(fieldDef)}_$$eq", List(typeRef), jst.VoidRef))
-
-      Seq(
-        // Getter
-        js.MethodDef(flags, getterIdent, NoOriginalName, Nil, fieldDef.ftpe,
-          Some(withInitializerCall(select)))(NoOptimizerHints, None),
-
-        // Setter
-        js.MethodDef(flags, setterIdent, NoOriginalName,
-          List(js.ParamDef(
-            valueIdent, NoOriginalName, fieldDef.ftpe, mutable = false,
-            rest = false)
-          ),
-          jst.NoType,
-          Some(withInitializerCall(
-            js.Assign(select, js.VarRef(valueIdent)(fieldDef.ftpe))
-          ))
-        )(NoOptimizerHints, None)
-      )
-    }
-  }
-
-  /**
-   * Generates a synthetic method that runs all static initializers and sets
-   * static fields.
-   *
-   * @param cls A JDT class definition.
-   */
-  def genStaticInitializer(cls: jdt.TypeDeclaration): Seq[js.MemberDef] = {
-    implicit val pos: Position = NoPosition
-
-    // This method is unique in that it takes the whole TypeDeclaration as an
-    // argument rather than a single AST node. The reason is that it must
-    // consider all static fields AND static initializers, in the correct order.
-    // We don't want to give this burden to the caller.
-
-    // Initializers are called in the order by which they appear in the
-    // code, so we have no choice but to consider both FieldDeclaration
-    // and Initializer types at once.
-    val statics = cls.bodyDeclarations
-      .asScala[jdt.BodyDeclaration]
-      .filter {
-        case f: jdt.FieldDeclaration
-          if jdt.Modifier.isStatic(f.getModifiers) => true
-        case i: jdt.Initializer
-          if jdt.Modifier.isStatic(i.getModifiers) => true
-        case _ => false
-      }
-
-    if (statics.isEmpty) return Nil
-
-    val flagIdent = js.FieldIdent(jsn.FieldName(freshName("$sjsirStaticCalled")))
-    val flagSelect = js.SelectStatic(thisClassName, flagIdent)(jst.BooleanType)
-    val flagTest = js.UnaryOp(js.UnaryOp.Boolean_!, flagSelect)
-    val flagSet = js.Assign(flagSelect, js.BooleanLiteral(value = true))
-    val memberFlags = js.MemberFlags.empty.withNamespace(js.MemberNamespace.PublicStatic)
-
-    val flag = js.FieldDef(memberFlags.withMutable(true),
-      flagIdent, NoOriginalName, jst.BooleanType)
-
-    val inits: List[js.Tree] = statics.flatMap {
-      case field: jdt.FieldDeclaration => genFieldInitializers(field)
-      case init: jdt.Initializer => Seq(genBlock(init.getBody))
-    }
-
-    val dyn = js.JSSelect(
-      js.ClassOf(jst.ClassRef(jsn.ClassName(cls.resolveBinding.getSuperclass.getBinaryName))),
-      js.StringLiteral(staticInitializerIdent.name.nameString)
-    )
-
-    val initializer = js.MethodDef(memberFlags, staticInitializerIdent,
-      NoOriginalName, Nil, jst.NoType,
-      Some(
-        js.If(flagTest, js.Block(flagSet, js.Block(dyn :: inits)),
-          js.Skip())(jst.NoType)
-      )
-    )(NoOptimizerHints, None)
-
-    Seq(flag, initializer)
   }
 
   def genMethod(method: jdt.MethodDeclaration): js.MethodDef = {
@@ -661,8 +696,8 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
             )
         }
 
-        // TODO: Detect whether the body is a loop and construct break and
-        //  continue scope automatically
+      // TODO: Detect whether the body is a loop and construct break and
+      //  continue scope automatically
 
 
       case s: jdt.ReturnStatement =>
@@ -732,14 +767,15 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
         js.Block(
           s.fragments.asScala[jdt.VariableDeclarationFragment]
-            .map { frag =>
-              js.VarDef(
-                js.LocalIdent(jsn.LocalName(frag.getName.getIdentifier)),
-                NoOriginalName,
-                tpe,
-                mutable = !jdt.Modifier.isFinal(s.getModifiers),
-                cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
-              )
+            .map {
+              frag =>
+                js.VarDef(
+                  js.LocalIdent(jsn.LocalName(frag.getName.getIdentifier)),
+                  NoOriginalName,
+                  tpe,
+                  mutable = !jdt.Modifier.isFinal(s.getModifiers),
+                  cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
+                )
             }
         )
 
@@ -807,6 +843,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         )
 
       case e: jdt.Assignment =>
+
         import jdt.Assignment.{Operator => A}
         import jdt.InfixExpression.{Operator => I}
 
@@ -900,6 +937,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         genSelect(genExprValue(e.getExpression), e.resolveFieldBinding)
 
       case e: jdt.InfixExpression =>
+
         import jdt.InfixExpression.Operator._
 
         val lhs = genExprValue(e.getLeftOperand)
@@ -911,19 +949,20 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
               .map(genExprValue(_))
           else List(rhs)
 
-        rights.foldLeft(lhs) { case (lhs, rhs) =>
-          if (isStringy(lhs) && e.getOperator == PLUS) {
-            // String concatenation
-            js.BinaryOp(
-              js.BinaryOp.String_+,
-              lhs,
-              cast(rhs, JDKStringType)
-            )
-          }
-          else {
-            // Arithmetic or logical op
-            genBinaryOperator(lhs, rhs, e.getOperator)
-          }
+        rights.foldLeft(lhs) {
+          case (lhs, rhs) =>
+            if (isStringy(lhs) && e.getOperator == PLUS) {
+              // String concatenation
+              js.BinaryOp(
+                js.BinaryOp.String_+,
+                lhs,
+                cast(rhs, JDKStringType)
+              )
+            }
+            else {
+              // Arithmetic or logical op
+              genBinaryOperator(lhs, rhs, e.getOperator)
+            }
         }
 
       case e: jdt.InstanceofExpression =>
@@ -991,13 +1030,19 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           case jst.IntType => js.IntLiteral(v.asInstanceOf[Int])
           case jst.LongType => js.LongLiteral(v.asInstanceOf[Long])
           case other =>
-            throw new IllegalArgumentException(s"Cannot bind number literal ${e.getToken} to type ${other}")
+            throw new IllegalArgumentException(s"Cannot bind number literal ${
+              e.getToken
+            } to type ${
+              other
+            }")
         }
 
       case e: jdt.ParenthesizedExpression => genExprValue(e.getExpression)
 
       case e: jdt.PostfixExpression =>
+
         import jdt.PostfixExpression.Operator._
+
         val expr = genExprValue(e.getOperand)
 
         val operation = e.getOperator match {
@@ -1033,7 +1078,9 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         }
 
       case e: jdt.PrefixExpression =>
+
         import jdt.PrefixExpression.Operator._
+
         val expr = genExprValue(e.getOperand)
 
         e.getOperator match {
@@ -1044,15 +1091,15 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
               unboxed(expr),
               jdt.InfixExpression.Operator.XOR
             )
-//            genBinaryOperator(
-//              genBinaryOperator(
-//                js.IntLiteral(value = 0),
-//                unboxed(expr),
-//                jdt.InfixExpression.Operator.MINUS
-//              ),
-//              js.IntLiteral(value = 1),
-//              jdt.InfixExpression.Operator.MINUS
-//            )
+          //            genBinaryOperator(
+          //              genBinaryOperator(
+          //                js.IntLiteral(value = 0),
+          //                unboxed(expr),
+          //                jdt.InfixExpression.Operator.MINUS
+          //              ),
+          //              js.IntLiteral(value = 1),
+          //              jdt.InfixExpression.Operator.MINUS
+          //            )
           case INCREMENT =>
             val operation = genBinaryOperator(
               unboxed(expr),
@@ -1182,14 +1229,15 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         val tpe = sjsType(e.getType.resolveBinding)
         js.Block(
           e.fragments.asScala[jdt.VariableDeclarationFragment]
-            .map { frag =>
-              js.VarDef(
-                js.LocalIdent(jsn.LocalName(frag.getName.getIdentifier)),
-                NoOriginalName,
-                tpe,
-                mutable = !jdt.Modifier.isFinal(e.getModifiers),
-                cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
-              )
+            .map {
+              frag =>
+                js.VarDef(
+                  js.LocalIdent(jsn.LocalName(frag.getName.getIdentifier)),
+                  NoOriginalName,
+                  tpe,
+                  mutable = !jdt.Modifier.isFinal(e.getModifiers),
+                  cast(genExprValue(frag.getInitializer, Some(tpe)), tpe)
+                )
             }
         )
     }
@@ -1198,6 +1246,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
   def genBinaryOperator(lhsIn: js.Tree, rhsIn: js.Tree,
                         jdtOp: jdt.InfixExpression.Operator)
                        (implicit pos: Position): js.Tree = {
+
     import jdt.InfixExpression.Operator._
     import org.scalajs.ir.Trees.BinaryOp._
 

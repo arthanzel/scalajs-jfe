@@ -117,6 +117,8 @@ object TypeUtils {
     }
   }
 
+  def sjsType(t: jdt.Type): jst.Type = sjsType(t.resolveBinding)
+
   def sjsArrayTypeRef(t: jdt.ITypeBinding): jst.ArrayTypeRef = {
     jst.ArrayTypeRef(
       sjsTypeRef(t.getElementType).asInstanceOf[jst.NonArrayTypeRef],
