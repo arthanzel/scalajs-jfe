@@ -5,7 +5,7 @@ import org.eclipse.jdt.core.{dom => jdt}
 import org.scalajs.ir.Trees.OptimizerHints
 import org.scalajs.ir.{ClassKind, OriginalName, Position, Names => jsn, Trees => js, Types => jst}
 import org.scalajs.jfe.JavaCompilationException
-import org.scalajs.jfe.trees.TreesSupport.{ConstructorInfo, FieldInfo, InitializerInfo}
+import org.scalajs.jfe.trees.TreesSupport._
 import org.scalajs.jfe.util.TextUtils
 
 import scala.collection.mutable
@@ -17,8 +17,8 @@ object JDTCompiler {
   private[jfe] val NoOriginalName = OriginalName.NoOriginalName
   private[jfe] val NoOptimizerHints = OptimizerHints.empty
   private[jfe] val NoPosition = Position.NoPosition
-  private[jfe] val WithConstructorFlags = js.ApplyFlags.empty.withConstructor(true)
-  private[jfe] val WithConstructorNS = js.MemberFlags.empty.withNamespace(js.MemberNamespace.Constructor)
+  private[jfe] val ConstructorApplyFlags = js.ApplyFlags.empty.withConstructor(true)
+  private[jfe] val ConstructorMemberFlags = js.MemberFlags.empty.withNamespace(js.MemberNamespace.Constructor)
   private[jfe] val OuterFieldIdent = js.FieldIdent(jsn.FieldName("$sjsirOuter"))(NoPosition)
   private[jfe] val OuterLocalIdent = js.LocalIdent(jsn.LocalName("$sjsirOuter"))(NoPosition)
 
@@ -122,7 +122,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
   private var outerClassNames: List[jsn.ClassName] = List()
   private val isNested: Boolean = topLevel.resolveBinding.isNested
-  private lazy val enclosingName = outerClassNames.head
+  private lazy val enclosingName = outerClassNames.head // TODO: Refactor to Option
   private lazy val enclosingType = jst.ClassType(enclosingName)
   private var hasStatics = false
   private val recInnerTypes = mutable.Set[js.ClassDef]()
@@ -201,11 +201,12 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       .collect { case Some(x) => x }
     val ctors =
       if (jdtConstructors.isEmpty)
-        List(genDefaultConstructor(superClassName, instanceInitializers))
+        List(genDefaultConstructor(instanceInitializers))
       else
-        jdtConstructors.map(
-          genConstructor(_, superClassName, instanceInitializers)
-        )
+        jdtConstructors.map { method =>
+          //          genConstructor(_, superClassName, instanceInitializers)
+          genExplicitConstructor(method, instanceInitializers)
+        }
 
     val outerFieldSynthetic =
       if (isNested)
@@ -395,6 +396,12 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     members ::: genStaticInitializer(inits.toList)
   }
 
+  def genStaticInitCall()(implicit pos: Position): js.Tree = {
+    if (this.hasStatics) js.ApplyStatic(js.ApplyFlags.empty, thisClassName,
+      staticInitializerIdent, Nil)(jst.NoType)
+    else js.Skip()
+  }
+
   /**
    * Generates a static method call to get the value of a static field.
    */
@@ -425,153 +432,88 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
   // endregion
 
-  case class CInfo(formalParams: List[js.ParamDef],
-                   enclosingClass: Option[jsn.ClassName],
-                   captures: List[jdt.IVariableBinding],
-                   superClassName: jsn.ClassName)
-                  (implicit val pos: Position) {
-    lazy val params: List[js.ParamDef] = {
-      val captureParams = captures.map { cap =>
-        js.ParamDef(
-          js.LocalIdent(jsn.LocalName(genCaptureName(cap.getName))),
-          NoOriginalName,
-          sjsType(cap.getType),
-          mutable = false, rest = false
-        )
+  // region Constructors
+
+  def genDefaultSuperConstructorCall(tb: jdt.ITypeBinding)
+                                    (implicit pos: Position): js.Tree = {
+    val info = CInfo.default(tb.getSuperclass)
+    val args = info.enclosingClassName.map(genOuterSelect)
+    js.ApplyStatically(
+      ConstructorApplyFlags,
+      thisNode,
+      info.className,
+      info.ident,
+      args.toList
+    )(jst.NoType)
+  }
+
+  def genDefaultConstructor(initializers: List[js.Tree]): js.MethodDef = {
+    implicit val pos: Position = NoPosition
+
+    val thisBinding = topLevel.resolveBinding
+    genConstructor(CInfo.default(thisBinding), None, initializers, Nil)
+  }
+
+  def genExplicitConstructor(method: jdt.MethodDeclaration,
+                             initializers: List[js.Tree]): js.MethodDef = {
+    implicit val pos: Position = getPosition(method)
+
+    // Extract the call to a super constructor or co-constructor, if it exists
+    val (jdtFirstCall, stats) = method.getBody.statements.asScala[jdt.Statement]
+      .span { s =>
+        s.isInstanceOf[jdt.SuperConstructorInvocation] ||
+          s.isInstanceOf[jdt.ConstructorInvocation]
       }
+    val headCall = jdtFirstCall.headOption.map(genStatement)
 
-      val enclosingParams = enclosingClass.map { name =>
-        js.ParamDef(
-          OuterLocalIdent,
-          NoOriginalName,
-          jst.ClassType(name),
-          mutable = false, rest = false
-        )
-      }.toList
+    // Only initialize instance variables if the constructor explicitly or
+    // implicitly calls a super constructor. This guarantees that
+    // initializations are run exactly once.
+    val shouldInitialize = jdtFirstCall.isEmpty ||
+      jdtFirstCall.head.isInstanceOf[jdt.SuperConstructorInvocation]
 
-      captureParams ::: enclosingParams ::: formalParams
-    }
-
-    lazy val ident: js.MethodIdent = js.MethodIdent(
-      jsn.MethodName.constructor(params.map(p => sjsTypeRef(p.ptpe)))
+    genConstructor(
+      CInfo.forMethod(method),
+      headCall,
+      if (shouldInitialize) initializers else Nil,
+      stats.map(genStatement)
     )
   }
 
-  /*
-  If the type is implicit constructable, this method creates a synthetic
-  constructor taking no parameters that calls the super constructor and
-  initializes all fields.
-   */
-  def genDefaultConstructor(superClassName: jsn.ClassName,
-                            initializers: List[js.Tree])
-                           (implicit pos: Position): js.MethodDef = {
-    // TODO: Use MethodInfo
-    val params = if (isNested) List(sjsTypeRef(enclosingType)) else Nil
-    val constructorIdent = js.MethodIdent(jsn.MethodName.constructor(params))
-    val paramDefs =
-      if (isNested)
-        List(js.ParamDef(js.LocalIdent(jsn.LocalName(OuterFieldIdent.name.nameString)),
-          NoOriginalName, enclosingType, mutable = false, rest = false))
-      else Nil
+  def genConstructor(info: ConstructorCallInfo,
+                     headCall: Option[js.Tree],
+                     initializers: List[js.Tree],
+                     body: List[js.Tree]): js.MethodDef = {
+    implicit val pos: Position = info.pos
 
-    val superC = MethodInfo.defaultConstructor(topLevel.resolveBinding.getSuperclass)
-    val superConstructorOuterSelect = superC.outerClassName.map(genOuterSelect)
-    val superConstructorCall = js.ApplyStatically(
-      WithConstructorFlags,
-      thisNode,
-      superC.declaringClassName,
-      superC.ident,
-      superConstructorOuterSelect.toList
-    )(jst.NoType)
+    // TODO: Set captures
 
-    val staticInitCall =
-      if (hasStatics) js.ApplyStatic(js.ApplyFlags.empty, thisClassName,
-        staticInitializerIdent, Nil)(jst.NoType)
-      else js.Skip()
-    val body = genSetOuter() :: superConstructorCall :: staticInitCall :: initializers
-
-    js.MethodDef(
-      WithConstructorNS,
-      constructorIdent,
-      NoOriginalName,
-      paramDefs,
-      jst.NoType,
-      Some(js.Block(body))
-    )(NoOptimizerHints, None)
-  }
-
-  /**
-   * Generates a constructor method declaration from a JDT constructor
-   * declaration.
-   *
-   * <p>
-   * Unlike normal methods, constructors in SJS must do some additional
-   * work:
-   * <ul>
-   * <li>If the constructor calls no other constructors, call the implicit super
-   * constructor;
-   * <li>If the constructor calls no other constructors on its own class,
-   * initialize instance fields. Unlike Scala, Java allows multiple constructor
-   * paths, so there is at least one "top-level" constructor that must
-   * initialize all the fields.
-   * </ul>
-   * </p>
-   *
-   * @param method         JDT method declaration corresponding to the constructor.
-   * @param superClassName Super class name.
-   */
-  def genConstructor(method: jdt.MethodDeclaration,
-                     superClassName: jsn.ClassName,
-                     initializers: List[js.Tree]): js.MethodDef = {
-    // TODO: Place field initializers in their own method if there are multiple
-    //  top-level constructors
-
-    implicit val position: Position = getPosition(method)
-
-    val mi = MethodInfo(method.resolveBinding)
-    val stats = method.getBody.statements.asScala[jdt.Statement]
-    val staticInitCall =
-      if (hasStatics) js.ApplyStatic(js.ApplyFlags.empty, thisClassName,
-        staticInitializerIdent, Nil)(jst.NoType)
-      else js.Skip()
-    val preludeAll = List(genSetOuter())
-    val (prelude, body) = stats match {
-      case (_: jdt.ConstructorInvocation) :: _ =>
-        // This constructor calls a co-constructor; it is not a top-level
-        // Do not add any synthetic code
-        (Nil, stats)
-
-      case (sci: jdt.SuperConstructorInvocation) :: rest =>
-        // This constructor explicitly calls a super-constructor
-        // Call super first, THEN initialize instance fields.
-        (genStatement(sci) :: staticInitCall :: initializers, rest)
-
-      case _ =>
-        // This constructor does not delegate. Call the implicit super and
-        // initialize instance fields.
-        val superMI = MethodInfo.defaultConstructor(topLevel.resolveBinding.getSuperclass)
-        val superInvocation = js.ApplyStatically(
-          WithConstructorFlags,
-          thisNode,
-          superMI.declaringClassName,
-          superMI.ident,
-          superMI.genArgsForConstructor(
-            mi.outerClassName.map(genOuterSelect), Nil
-          )
-        )(jst.NoType)
-
-        (superInvocation :: staticInitCall :: initializers, stats)
+    val setEnclosing = info.enclosingClassName match {
+      case None => js.Skip()
+      case Some(enclosing) => js.Assign(
+        js.Select(thisNode, thisClassName, OuterFieldIdent)(jst.ClassType(enclosing)),
+        js.VarRef(OuterLocalIdent)(jst.ClassType(enclosing))
+      )
     }
 
+    val statements =
+      setEnclosing ::
+        headCall.getOrElse(genDefaultSuperConstructorCall(info.cls)) ::
+        genStaticInitCall() ::
+        js.Block(initializers) ::
+        body
+
     js.MethodDef(
-      WithConstructorNS,
-      MethodInfo(method.resolveBinding).ident,
+      ConstructorMemberFlags,
+      info.ident,
       NoOriginalName,
-      mi.genParamDefs(method.parameters),
+      info.params,
       jst.NoType,
-      Some(js.Block(preludeAll ::: prelude ::: body.map(genStatement)))
+      Some(js.Block(statements))
     )(NoOptimizerHints, None)
   }
+
+  // endregion
 
   def genMethod(method: jdt.MethodDeclaration): js.MethodDef = {
     implicit val position: Position = getPosition(method)
@@ -643,7 +585,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case s: jdt.ConstructorInvocation =>
         val mi = MethodInfo(s.resolveConstructorBinding)
         js.ApplyStatically(
-          WithConstructorFlags,
+          ConstructorApplyFlags,
           thisNode,
           thisClassName,
           mi.ident,
@@ -723,7 +665,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case s: jdt.SuperConstructorInvocation =>
         val mi = MethodInfo(s.resolveConstructorBinding)
         js.ApplyStatically(
-          WithConstructorFlags,
+          ConstructorApplyFlags,
           thisNode,
           mi.declaringClassName,
           mi.ident,
@@ -770,7 +712,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
         val compiler = new JDTCompiler(compilationUnit, s.getDeclaration)
         compiler.outerClassNames = thisClassName :: outerClassNames
         recInnerTypes ++= compiler.gen()
-        println(compiler.captureVBs)
 
         js.Skip()
 
@@ -907,8 +848,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
           val anon = e.getAnonymousClassDeclaration
           val superArgs = e.arguments.asScala[jdt.Expression]
             .map(genExprValue(_))
-          println("BINNAME", e.resolveTypeBinding.getBinaryName)
-          println(e.resolveConstructorBinding)
         }
 
         // TODO: Support anonymous class construction
