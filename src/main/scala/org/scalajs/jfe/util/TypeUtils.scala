@@ -5,6 +5,7 @@ import org.scalajs.ir.{Position, Names => jsn, Trees => js, Types => jst}
 import org.scalajs.jfe.JavaCompilationException
 
 object TypeUtils {
+  // TODO: Get these from Names
   val HijackedClasses: Set[String] = Set("java.lang.Boolean",
     "java.lang.Character", "java.lang.Byte", "java.lang.Short",
     "java.lang.Integer", "java.lang.Long", "java.lang.Float",

@@ -9,12 +9,4 @@ object TreeHelpers {
   implicit class ListHasAsScala(l: java.util.List[_]) {
     def asScala[A: ClassTag]: List[A] = l.toArray.map(_.asInstanceOf[A]).toList
   }
-
-  implicit class IterableHasTakeUntil[T](iterable: Iterable[T]) {
-    def takeUntil(p: T => Boolean): Iterable[T] = {
-      iterable.span(p) match {
-        case (head, tail) => head ++ tail.take(1)
-      }
-    }
-  }
 }
