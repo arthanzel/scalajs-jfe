@@ -24,7 +24,7 @@ object JDTCompiler {
 
   def apply(compilationUnit: jdt.CompilationUnit): List[js.ClassDef] =
     compilationUnit.types().asScala[jdt.AbstractTypeDeclaration]
-      .flatMap { t => new JDTCompiler(compilationUnit, t).gen() }
+      .flatMap { t => new JDTCompiler(compilationUnit, Compileable(t)).gen() }
 
   /**
    * Terminating statements are statements that certainly cause the containing
@@ -67,11 +67,21 @@ object JDTCompiler {
     s"${name}_$$eq"
 }
 
+object Compileable {
+  def apply(ast: jdt.AbstractTypeDeclaration): Compileable =
+    Compileable(ast, ast.resolveBinding)
+
+  def apply(ast: jdt.AnonymousClassDeclaration): Compileable =
+    Compileable(ast, ast.resolveBinding)
+}
+
+case class Compileable(ast: jdt.ASTNode, binding: jdt.ITypeBinding)
+
 /**
  * The JDTCompiler class compiles a single JDT type definition into SJSIR code.
  */
 private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
-                          topLevel: jdt.AbstractTypeDeclaration) {
+                          topLevel: Compileable) {
 
   import JDTCompiler._
   import TreeHelpers._
@@ -79,13 +89,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
   // region State stuff
 
-  def packageName: Option[String] = {
-    if (compilationUnit.getPackage == null) return None
-    Some(compilationUnit.getPackage.getName.getFullyQualifiedName)
-  }
-
-  val qualifiedThis: String = topLevel.resolveBinding.getBinaryName
-  val thisClassName: jsn.ClassName = jsn.ClassName(qualifiedThis)
+  val thisClassName: jsn.ClassName = jsn.ClassName(topLevel.binding.getBinaryName)
   val thisClassType: jst.ClassType = jst.ClassType(thisClassName)
 
   def thisNode(implicit pos: Position): js.This = js.This()(thisClassType)
@@ -121,12 +125,12 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
   }
 
   private var outerClassNames: List[jsn.ClassName] = List()
-  private val isNested: Boolean = topLevel.resolveBinding.isNested
+  private val isNested: Boolean = topLevel.binding.isNested
   private lazy val enclosingName = outerClassNames.head // TODO: Refactor to Option
   private lazy val enclosingType = jst.ClassType(enclosingName)
   private var hasStatics = false
   private val recInnerTypes = mutable.Set[js.ClassDef]()
-  private val captureVBs = mutable.ArrayBuffer[jdt.IVariableBinding]()
+  private val captureVBs = mutable.ListBuffer[jdt.IVariableBinding]()
 
   // endregion
 
@@ -134,7 +138,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
    * Generates the SJSIR tree. This is the main entry point for clients.
    */
   def gen(): List[js.ClassDef] = {
-    topLevel match {
+    topLevel.ast match {
       case _: jdt.AnnotationTypeDeclaration =>
         println("Annotation declaration is a no-op")
         Nil
@@ -143,6 +147,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case intf: jdt.TypeDeclaration if intf.isInterface =>
         throw new NotImplementedError("Compiling interfaces is not supported yet")
       case cls: jdt.TypeDeclaration => genClass(cls)
+      case anon: jdt.AnonymousClassDeclaration => genAnonymousClass2(anon)
     }
   }
 
@@ -174,12 +179,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     // Partition members
     // Attention! The getFields(), getMethods(), and getTypes() methods are just
     // filters over bodyDeclarations().
-    // Lists beginning with `jdt` contain JDT AST nodes.
-    // Lists beginning with `sjs` contain processed SJSIR nodes.
-    // JDT nodes contain some binding information we need later, so that's why
-    // they're kept around.
-    val (_, jdtInstanceFields) = cls.getFields
-      .partition { f => jdt.Modifier.isStatic(f.getModifiers) }
     val jdtConstructors = cls.getMethods.filter(_.isConstructor).toList
 
     // Preprocess members to make internal counters consistent
@@ -197,8 +196,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     // Note: constructor generation must follow member generation so that
     // captures can be identified in one pass!
     val instanceInitializers = instanceFieldInfos
-      .map(_.initializer(thisClassName))
-      .collect { case Some(x) => x }
+      .flatMap(_.initializer(thisClassName))
     val ctors =
       if (jdtConstructors.isEmpty)
         List(genDefaultConstructor(instanceInitializers))
@@ -238,14 +236,84 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
     )(NoOptimizerHints)
 
     // Generate class defs for inner types
-    val innerTypes = cls.getTypes
+    val innerTypes = cls.getTypes.toList
       .flatMap { t =>
-        val compiler = new JDTCompiler(compilationUnit, t)
+        val compiler = new JDTCompiler(compilationUnit, Compileable(t))
         compiler.outerClassNames = thisClassName :: outerClassNames
         compiler.gen()
       }
 
-    classDef :: innerTypes.toList ::: recInnerTypes.toList
+    classDef :: innerTypes ::: recInnerTypes.toList
+  }
+
+  private def genAnonymousClass2(ast: jdt.AnonymousClassDeclaration): List[js.ClassDef] = {
+    implicit val pos: Position = getPosition(ast)
+
+    val binding = ast.resolveBinding
+    val superClassName = jsn.ClassName(binding.getSuperclass.getBinaryName)
+
+    val decls = ast.bodyDeclarations.asScala[jdt.BodyDeclaration]
+    val fields = decls.collect { case x: jdt.FieldDeclaration => x }
+      .flatMap(genFieldInfo)
+    val methods = decls.collect { case x: jdt.MethodDeclaration => x }
+      .map(genMethod)
+    val outerFieldSynthetic = js.FieldDef(js.MemberFlags.empty, OuterFieldIdent,
+      NoOriginalName, jst.ClassType(enclosingName))
+
+    // Capture processing
+    val captureFields = captureVBs.toList.map { capture =>
+      js.FieldDef(
+        js.MemberFlags.empty,
+        js.FieldIdent(jsn.FieldName(genCaptureName(capture.getName))),
+        OriginalName(capture.getName),
+        sjsType(capture.getType)
+      )
+    }
+    val captureAssigns = captureFields.map { field =>
+      js.Assign(
+        js.Select(thisNode, thisClassName, field.name)(field.ftpe),
+        js.VarRef(
+          js.LocalIdent(jsn.LocalName(field.name.name.nameString))
+        )(field.ftpe)
+      )
+    }
+
+    // Generate default constructor
+    // This must come after field/method processing to ensure that all captures
+    // are found
+    val cInfo = ConstructorCallInfo(binding, Nil, captureVBs.toList)
+    val ctor = genConstructor(cInfo, None, Nil, captureAssigns)
+
+    val body =
+      outerFieldSynthetic ::
+        captureFields :::
+        fields.map(_.fieldDef) :::
+        List(ctor) :::
+        methods
+
+    val classDef = js.ClassDef(
+      js.ClassIdent(thisClassName),
+      NoOriginalName,
+      ClassKind.Class,
+      None,
+      Some(js.ClassIdent(superClassName)),
+      binding.getInterfaces.toList.map { iface =>
+        js.ClassIdent(jsn.ClassName(iface.getBinaryName))
+      },
+      None,
+      None,
+      body,
+      Nil
+    )(NoOptimizerHints)
+
+    val innerTypes = decls.collect { case x: jdt.AbstractTypeDeclaration => x }
+      .flatMap { t =>
+        val compiler = new JDTCompiler(compilationUnit, Compileable(t))
+        compiler.outerClassNames = thisClassName :: outerClassNames
+        compiler.gen()
+      }
+
+    classDef :: innerTypes ::: recInnerTypes.toList
   }
 
   def genFieldInfo(field: jdt.FieldDeclaration): List[FieldInfo] = {
@@ -450,7 +518,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
   def genDefaultConstructor(initializers: List[js.Tree]): js.MethodDef = {
     implicit val pos: Position = NoPosition
 
-    val thisBinding = topLevel.resolveBinding
+    val thisBinding = topLevel.binding
     genConstructor(CInfo.default(thisBinding), None, initializers, Nil)
   }
 
@@ -709,7 +777,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
       case s: jdt.TryStatement => ???
 
       case s: jdt.TypeDeclarationStatement =>
-        val compiler = new JDTCompiler(compilationUnit, s.getDeclaration)
+        val compiler = new JDTCompiler(compilationUnit, Compileable(s.getDeclaration))
         compiler.outerClassNames = thisClassName :: outerClassNames
         recInnerTypes ++= compiler.gen()
 
@@ -845,9 +913,25 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
       case e: jdt.ClassInstanceCreation =>
         if (e.getAnonymousClassDeclaration != null) {
-          val anon = e.getAnonymousClassDeclaration
-          val superArgs = e.arguments.asScala[jdt.Expression]
-            .map(genExprValue(_))
+          val decl = e.getAnonymousClassDeclaration
+          val binding = decl.resolveBinding
+
+          val compiler = new JDTCompiler(compilationUnit, Compileable(decl))
+          compiler.outerClassNames = thisClassName :: outerClassNames
+          recInnerTypes ++= compiler.gen()
+
+          val info = ConstructorCallInfo(
+            binding, Nil,
+            compiler.captureVBs.toList)
+          val enclosingRef =
+            if (jdt.Modifier.isStatic(binding.getDeclaringMember.getModifiers))
+              js.Null()
+            else thisNode
+          val args = compiler.captureVBs.toList.map { capture =>
+            genVarOrFieldSelect(None, capture)
+          } ::: List(enclosingRef)
+
+          return js.New(compiler.thisClassName, info.ident, args)
         }
 
         // TODO: Support anonymous class construction
@@ -1560,6 +1644,7 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
 
               if (getDeclaringClass(vb).getBinaryName != thisClassName.nameString) {
                 // Capture
+                this.captureVBs += vb
                 staticCast(
                   js.Select(
                     thisNode, thisClassName,
@@ -1567,9 +1652,6 @@ private class JDTCompiler(compilationUnit: jdt.CompilationUnit,
                   )(sjsType(vb.getVariableDeclaration.getType)),
                   sjsType(vb.getType)
                 )
-                this.captureVBs += vb
-
-                js.Skip()
               }
               else {
                 // Parameter or local variable
